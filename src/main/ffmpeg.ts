@@ -92,4 +92,30 @@ export function extractAudio(videoPath: string, outputPath: string): Promise<str
   })
 }
 
+export function trimVideo(
+  inputPath: string,
+  outputPath: string,
+  startTime: number,
+  endTime: number
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .setStartTime(startTime)
+      .setDuration(endTime - startTime)
+      .outputOptions(['-y', '-c', 'copy'])
+      .on('end', () => resolve(outputPath))
+      .on('error', () => {
+        // Fallback: re-encode if stream copy fails
+        ffmpeg(inputPath)
+          .setStartTime(startTime)
+          .setDuration(endTime - startTime)
+          .outputOptions(['-y', '-c:v', 'libx264', '-preset', 'fast', '-c:a', 'aac'])
+          .on('end', () => resolve(outputPath))
+          .on('error', reject)
+          .save(outputPath)
+      })
+      .save(outputPath)
+  })
+}
+
 export { ffmpeg }

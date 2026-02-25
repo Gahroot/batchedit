@@ -26,6 +26,12 @@ const api = {
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   readAudioBuffer: (wavPath: string) => ipcRenderer.invoke('ffmpeg:readAudioBuffer', wavPath),
 
+  splitVideo: (
+    videoPath: string,
+    segments: Array<{ label: string; bucket: string; startTime: number; endTime: number }>,
+    outputDir: string | null
+  ) => ipcRenderer.invoke('ffmpeg:splitVideo', videoPath, segments, outputDir),
+
   // AI
   generateHookText: (apiKey: string, transcript: string) =>
     ipcRenderer.invoke('ai:generateHookText', apiKey, transcript),

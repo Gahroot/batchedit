@@ -1,5 +1,5 @@
 import { ipcMain, app } from 'electron'
-import { ffmpeg, getVideoMetadata, extractAudio } from './ffmpeg'
+import { ffmpeg, getVideoMetadata, extractAudio, trimVideo } from './ffmpeg'
 import { join, normalize } from 'path'
 import { writeFileSync, mkdirSync, unlinkSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -12,10 +12,17 @@ function getFontsDir(): string {
   return join(app.getAppPath(), 'resources', 'fonts')
 }
 
-/** Escape a file path for use inside an FFmpeg filter option value.
- *  Uses single-quote wrapping (FFmpeg filter syntax) to protect colons in Windows drive letters. */
+/** Escape a file path for use inside an FFmpeg -filter_complex option value.
+ *  Needs DOUBLE backslash escaping: the filter graph parser consumes one level,
+ *  then the filter option parser consumes the second.
+ *  Ref: github.com/ddean2009/MoneyPrinterPlus (confirmed working on Windows) */
 function escapeFilterPath(p: string): string {
-  return "'" + p.replace(/\\/g, '/').replace(/'/g, "'\\''") + "'"
+  return p
+    .replace(/\\/g, '/')        // normalize Windows backslashes to forward slashes
+    .replace(/:/g, '\\\\:')     // double-escape colons (C: → C\\:)
+    .replace(/'/g, "\\\\'")     // double-escape single quotes
+    .replace(/\[/g, '\\\\[')    // double-escape open brackets
+    .replace(/\]/g, '\\\\]')    // double-escape close brackets
 }
 
 function cssHexToAssBgr(hex: string): string {
@@ -210,6 +217,29 @@ export function setupRenderPipeline(): void {
     const buffer = readFileSync(wavPath)
     return parseWavToFloat32(buffer).buffer
   })
+
+  // Split video into segments
+  ipcMain.handle(
+    'ffmpeg:splitVideo',
+    async (
+      _event,
+      videoPath: string,
+      segments: Array<{ label: string; bucket: string; startTime: number; endTime: number }>,
+      outputDir: string | null
+    ) => {
+      const dir = outputDir || join(tmpdir(), `batchedit-split-${uuidv4()}`)
+      mkdirSync(dir, { recursive: true })
+
+      const results: Array<{ label: string; bucket: string; outputPath: string }> = []
+      for (const seg of segments) {
+        const safeName = seg.label.replace(/[<>:"/\\|?*]+/g, '_').replace(/\s+/g, '_')
+        const outputPath = join(dir, `${safeName}.mp4`)
+        await trimVideo(videoPath, outputPath, seg.startTime, seg.endTime)
+        results.push({ label: seg.label, bucket: seg.bucket, outputPath })
+      }
+      return results
+    }
+  )
 
   // Thumbnail generation
   ipcMain.handle('ffmpeg:thumbnail', async (_event, videoPath: string) => {
