@@ -13,7 +13,10 @@
     "build:unpack": "npm run build && electron-builder --dir",
     "build:win": "npm run build && electron-builder --win",
     "build:mac": "npm run build && electron-builder --mac",
-    "build:linux": "npm run build && electron-builder --linux"
+    "build:linux": "npm run build && electron-builder --linux",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:main": "vitest run --config vitest.config.main.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -39,6 +42,8 @@
   "devDependencies": {
     "@electron-toolkit/preload": "^3.0.1",
     "@electron-toolkit/utils": "^4.0.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@types/fluent-ffmpeg": "^2.1.27",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
@@ -51,13 +56,15 @@
     "electron": "^34.0.0",
     "electron-builder": "^25.0.0",
     "electron-vite": "^3.0.0",
+    "jsdom": "^28.1.0",
     "postcss": "^8.5.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^3.0.0",
     "tailwindcss": "^3.4.0",
     "tailwindcss-animate": "^1.0.7",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.18"
   },
   "build": {
     "appId": "com.batchedit.app",
@@ -66,6 +73,9 @@
     "asarUnpack": [
       "node_modules/ffmpeg-static/**",
       "node_modules/@ffprobe-installer/**"
+    ],
+    "extraResources": [
+      { "from": "resources/fonts", "to": "fonts", "filter": ["**/*.ttf"] }
     ],
     "directories": {
       "buildResources": "build"

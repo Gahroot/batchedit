@@ -22,6 +22,7 @@ interface RenderJob {
   textOverlay?: string
   hookDurationSec?: number
   captionsAssPath?: string
+  autoResize?: boolean
   resolution: { width: number; height: number }
 }
 
@@ -30,6 +31,11 @@ interface RenderProgress {
   percent: number
   status: 'queued' | 'rendering' | 'done' | 'error'
   error?: string
+}
+
+interface CaptionStyleOptions {
+  fontName: string
+  highlightColor: string
 }
 
 interface Api {
@@ -50,6 +56,7 @@ interface Api {
       offsetMs: number
     }>
     resolution: { width: number; height: number }
+    captionStyle?: CaptionStyleOptions
   }) => Promise<string>
   renderBatch: (jobs: RenderJob[]) => Promise<RenderProgress[]>
   onRenderProgress: (callback: (progress: RenderProgress[]) => void) => () => void

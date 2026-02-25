@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, Loader2, CheckCircle, AlertCircle, Captions } from 'lucide-react'
-import { useStore, RenderProgress } from '../store'
+import { Play, Loader2, CheckCircle, AlertCircle, Captions, Crop } from 'lucide-react'
+import { useStore, RenderProgress, CAPTION_PRESETS } from '../store'
 import { useWhisper } from '@/hooks/useWhisper'
 import { WhisperStatus } from './WhisperStatus'
 import { ErrorLog } from './ErrorLog'
@@ -35,12 +35,16 @@ export function RenderPanel() {
   const setCaptionProgress = useStore((s) => s.setCaptionProgress)
   const addError = useStore((s) => s.addError)
   const clearErrors = useStore((s) => s.clearErrors)
+  const captionStyle = useStore((s) => s.captionStyle)
+  const setCaptionStyle = useStore((s) => s.setCaptionStyle)
+  const setHighlightColor = useStore((s) => s.setHighlightColor)
 
   const { loadModel, transcribe, isModelLoading, isModelReady, isTranscribing, loadProgress } =
     useWhisper()
 
   const [renderCount, setRenderCount] = useState<number | 'all'>('all')
   const [autoCaptions, setAutoCaptions] = useState(false)
+  const [autoResize, setAutoResize] = useState(false)
   const [showProgress, setShowProgress] = useState(false)
 
   // Listen for render progress updates
@@ -157,7 +161,8 @@ export function RenderPanel() {
           meatPath: combo.meat.path,
           ctaPath: combo.cta.path,
           outputPath: `${settings.outputDirectory}/${outputName}`,
-          resolution: { width: settings.resolution.width, height: settings.resolution.height }
+          resolution: { width: settings.resolution.width, height: settings.resolution.height },
+          autoResize
         }
 
         // Add text overlay if defined
@@ -184,7 +189,11 @@ export function RenderPanel() {
 
             const assPath = await window.api.generateCombinedAss({
               segments,
-              resolution: job.resolution
+              resolution: job.resolution,
+              captionStyle: {
+                fontName: captionStyle.fontName,
+                highlightColor: captionStyle.highlightColor
+              }
             })
             job.captionsAssPath = assPath
           } catch (err) {
@@ -320,31 +329,31 @@ export function RenderPanel() {
 
       {/* Controls */}
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          {/* Render Count */}
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">Render:</span>
-            <Select
-              value={renderCount === 'all' ? 'all' : String(renderCount)}
-              onValueChange={(value) =>
-                setRenderCount(value === 'all' ? 'all' : parseInt(value))
-              }
-              disabled={isRendering}
-            >
-              <SelectTrigger className="h-7 w-auto text-xs gap-1 px-2">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All ({totalCombos})</SelectItem>
-                {renderCountOptions.map((n) => (
-                  <SelectItem key={n} value={String(n)}>
-                    {n}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+        {/* Render Count */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">Render:</span>
+          <Select
+            value={renderCount === 'all' ? 'all' : String(renderCount)}
+            onValueChange={(value) =>
+              setRenderCount(value === 'all' ? 'all' : parseInt(value))
+            }
+            disabled={isRendering}
+          >
+            <SelectTrigger className="h-7 w-auto text-xs gap-1 px-2">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All ({totalCombos})</SelectItem>
+              {renderCountOptions.map((n) => (
+                <SelectItem key={n} value={String(n)}>
+                  {n}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
 
+        <div className="flex items-center gap-3">
           {/* Auto Captions Toggle */}
           <label className="flex items-center gap-1.5 text-xs cursor-pointer">
             <Switch
@@ -356,22 +365,75 @@ export function RenderPanel() {
             <Captions className="w-3.5 h-3.5 text-muted-foreground" />
             <span className="text-muted-foreground">Auto Captions</span>
           </label>
-        </div>
 
-        {/* Render Button */}
-        <Button size="lg" onClick={handleRender} disabled={!canRender}>
-          {isRendering ? (
+          {/* Caption Style Controls (visible when auto captions enabled) */}
+          {autoCaptions && (
             <>
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Rendering...
-            </>
-          ) : (
-            <>
-              <Play className="w-4 h-4" />
-              Render {renderCount === 'all' ? totalCombos : renderCount} Videos
+              {/* Font Selector */}
+              <Select
+                value={captionStyle.id}
+                onValueChange={(value) => {
+                  const preset = CAPTION_PRESETS[value]
+                  if (preset) setCaptionStyle({ ...preset, highlightColor: captionStyle.highlightColor })
+                }}
+                disabled={isRendering}
+              >
+                <SelectTrigger className="h-7 w-auto text-xs gap-1 px-2">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.values(CAPTION_PRESETS).map((preset) => (
+                    <SelectItem key={preset.id} value={preset.id}>
+                      {preset.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              {/* Highlight Color Picker */}
+              <label className="relative cursor-pointer" title="Highlight color">
+                <div
+                  className="w-6 h-6 rounded border border-border"
+                  style={{ backgroundColor: captionStyle.highlightColor }}
+                />
+                <input
+                  type="color"
+                  value={captionStyle.highlightColor}
+                  onChange={(e) => setHighlightColor(e.target.value)}
+                  disabled={isRendering}
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                />
+              </label>
             </>
           )}
-        </Button>
+
+          {/* Auto Resize Toggle */}
+          <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+            <Switch
+              checked={autoResize}
+              onCheckedChange={setAutoResize}
+              disabled={isRendering}
+              className="scale-75"
+            />
+            <Crop className="w-3.5 h-3.5 text-muted-foreground" />
+            <span className="text-muted-foreground">Auto Resize</span>
+          </label>
+
+          {/* Render Button */}
+          <Button size="lg" onClick={handleRender} disabled={!canRender}>
+            {isRendering ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Rendering...
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4" />
+                Render {renderCount === 'all' ? totalCombos : renderCount} Videos
+              </>
+            )}
+          </Button>
+        </div>
       </div>
     </div>
   )

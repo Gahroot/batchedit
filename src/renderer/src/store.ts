@@ -38,6 +38,22 @@ export interface ErrorLogEntry {
   message: string
 }
 
+export interface CaptionStyle {
+  id: string
+  label: string
+  fontName: string
+  fontFile: string
+  highlightColor: string
+}
+
+export const CAPTION_PRESETS: Record<string, CaptionStyle> = {
+  montserrat: { id: 'montserrat', label: 'Montserrat', fontName: 'Montserrat', fontFile: 'Montserrat-Bold.ttf', highlightColor: '#FFFF00' },
+  poppins:    { id: 'poppins',    label: 'Poppins',    fontName: 'Poppins',    fontFile: 'Poppins-Bold.ttf',    highlightColor: '#FFFF00' },
+  roboto:     { id: 'roboto',     label: 'Roboto',     fontName: 'Roboto',     fontFile: 'Roboto-Bold.ttf',     highlightColor: '#FFFF00' },
+  opensans:   { id: 'opensans',   label: 'Open Sans',  fontName: 'Open Sans',  fontFile: 'OpenSans-Bold.ttf',   highlightColor: '#FFFF00' },
+  inter:      { id: 'inter',      label: 'Inter',      fontName: 'Inter',      fontFile: 'Inter-Bold.ttf',      highlightColor: '#FFFF00' },
+}
+
 interface AppState {
   // Buckets
   hooks: Clip[]
@@ -57,6 +73,11 @@ interface AppState {
   // Caption state
   captionProgress: CaptionProgress | null
   setCaptionProgress: (progress: CaptionProgress | null) => void
+
+  // Caption style
+  captionStyle: CaptionStyle
+  setCaptionStyle: (style: CaptionStyle) => void
+  setHighlightColor: (color: string) => void
 
   // Error log
   errorLog: ErrorLogEntry[]
@@ -97,9 +118,16 @@ export const useStore = create<AppState>((set, get) => ({
   renderProgress: [],
   isRendering: false,
   captionProgress: null,
+  captionStyle: CAPTION_PRESETS.montserrat,
   errorLog: [],
 
   setCaptionProgress: (progress) => set({ captionProgress: progress }),
+
+  setCaptionStyle: (style) => set({ captionStyle: style }),
+  setHighlightColor: (color) =>
+    set((state) => ({
+      captionStyle: { ...state.captionStyle, highlightColor: color }
+    })),
 
   addError: (entry) =>
     set((state) => ({

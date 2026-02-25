@@ -19,6 +19,7 @@ const api = {
       offsetMs: number
     }[]
     resolution: { width: number; height: number }
+    captionStyle?: { fontName: string; highlightColor: string }
   }) => ipcRenderer.invoke('ffmpeg:generateCombinedAss', data),
 
   getThumbnail: (videoPath: string) => ipcRenderer.invoke('ffmpeg:thumbnail', videoPath),

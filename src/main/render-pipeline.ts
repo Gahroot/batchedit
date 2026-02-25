@@ -5,6 +5,21 @@ import { writeFileSync, mkdirSync, unlinkSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { v4 as uuidv4 } from 'uuid'
 
+function getFontsDir(): string {
+  if (app.isPackaged) {
+    return join(process.resourcesPath, 'fonts')
+  }
+  return join(app.getAppPath(), 'resources', 'fonts')
+}
+
+function cssHexToAssBgr(hex: string): string {
+  const clean = hex.replace('#', '')
+  const r = clean.substring(0, 2)
+  const g = clean.substring(2, 4)
+  const b = clean.substring(4, 6)
+  return `&H00${b}${g}${r}`
+}
+
 export interface RenderJob {
   id: string
   hookPath: string
@@ -14,6 +29,7 @@ export interface RenderJob {
   textOverlay?: string
   hookDurationSec?: number
   captionsAssPath?: string
+  autoResize?: boolean
   resolution: { width: number; height: number }
 }
 
@@ -33,8 +49,11 @@ function concatWithNormalization(
 
     // Build filter graph: normalize each input then concat
     const scaleFilter = (idx: number): string =>
-      `[${idx}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-      `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,fps=30,setpts=PTS-STARTPTS[v${idx}]`
+      job.autoResize
+        ? `[${idx}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,` +
+          `crop=${width}:${height},fps=30,setpts=PTS-STARTPTS[v${idx}]`
+        : `[${idx}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
+          `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,fps=30,setpts=PTS-STARTPTS[v${idx}]`
 
     const filters = [
       scaleFilter(0),
@@ -63,10 +82,11 @@ function concatWithNormalization(
       currentLabel = '[vtxt]'
     }
 
-    // Add ASS captions if provided
+    // Add ASS captions if provided (with fontsdir for bundled fonts)
     if (job.captionsAssPath) {
       const escaped = job.captionsAssPath.replace(/\\/g, '/').replace(/:/g, '\\:')
-      filters.push(`${currentLabel}ass=${escaped}[vfinal]`)
+      const fontsDir = getFontsDir().replace(/\\/g, '/').replace(/:/g, '\\:')
+      filters.push(`${currentLabel}ass=${escaped}:fontsdir=${fontsDir}[vfinal]`)
       currentLabel = '[vfinal]'
     }
 
@@ -158,9 +178,10 @@ export function setupRenderPipeline(): void {
           offsetMs: number
         }[]
         resolution: { width: number; height: number }
+        captionStyle?: { fontName: string; highlightColor: string }
       }
     ) => {
-      const assContent = generateCombinedAssFile(data.segments, data.resolution)
+      const assContent = generateCombinedAssFile(data.segments, data.resolution, data.captionStyle)
       const tmpPath = join(tmpdir(), `batchedit-karaoke-${uuidv4()}.ass`)
       writeFileSync(tmpPath, assContent, 'utf-8')
       return tmpPath
@@ -263,6 +284,8 @@ export function generateAssFile(
 ): string {
   const { width, height } = resolution
   const fontSize = Math.round(height * 0.04)
+  const isVertical916 = width * 16 <= height * 9
+  const marginV = isVertical916 ? Math.round(height * 0.08) : Math.round(height * 0.03)
 
   const header = `[Script Info]
 ScriptType: v4.00+
@@ -272,8 +295,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,${fontSize},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,0,2,10,10,${Math.round(height * 0.05)},1
-Style: Highlight,Arial,${fontSize},&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,0,2,10,10,${Math.round(height * 0.05)},1
+Style: Default,Arial,${fontSize},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,0,8,10,10,${marginV},1
+Style: Highlight,Arial,${fontSize},&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,0,8,10,10,${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
@@ -298,11 +321,16 @@ export function formatAssTimestamp(ms: number): string {
 
 export function generateWordHighlightAssFile(
   wordChunks: { text: string; start: number; end: number }[],
-  resolution: { width: number; height: number }
+  resolution: { width: number; height: number },
+  style?: { fontName: string; highlightColor: string }
 ): string {
   const { width, height } = resolution
   const fontSize = Math.round(height * 0.05)
-  const marginV = Math.round(height * 0.05)
+  const isVertical916 = width * 16 <= height * 9
+  // 9:16: just below center (40% up from bottom); others: near bottom (5%)
+  const marginV = isVertical916 ? Math.round(height * 0.40) : Math.round(height * 0.05)
+  const fontName = style?.fontName || 'Arial'
+  const highlightBgr = style ? cssHexToAssBgr(style.highlightColor) : '&H0000FFFF'
 
   const header = `[Script Info]
 ScriptType: v4.00+
@@ -312,7 +340,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Karaoke,Arial,${fontSize},&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,10,10,${marginV},1
+Style: Karaoke,${fontName},${fontSize},&H00FFFFFF,${highlightBgr},&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,10,10,${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
@@ -345,7 +373,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
 
 export function generateCombinedAssFile(
   segments: { wordChunks: { text: string; start: number; end: number }[]; offsetMs: number }[],
-  resolution: { width: number; height: number }
+  resolution: { width: number; height: number },
+  style?: { fontName: string; highlightColor: string }
 ): string {
   // Combine all segments with their time offsets applied
   const allChunks: { text: string; start: number; end: number }[] = []
@@ -361,7 +390,7 @@ export function generateCombinedAssFile(
     }
   }
 
-  return generateWordHighlightAssFile(allChunks, resolution)
+  return generateWordHighlightAssFile(allChunks, resolution, style)
 }
 
 function generateTextOverlayAssFile(
@@ -371,6 +400,8 @@ function generateTextOverlayAssFile(
 ): string {
   const { width, height } = resolution
   const fontSize = Math.round(height * 0.035)
+  const isVertical916 = width * 16 <= height * 9
+  const marginV = isVertical916 ? Math.round(height * 0.08) : Math.round(height * 0.03)
 
   // ASS colours: &HAABBGGRR
   // BorderStyle 3 = opaque box; BackColour is the box fill
@@ -382,7 +413,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TextOverlay,Arial,${fontSize},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,3,10,2,5,10,10,10,1
+Style: TextOverlay,Arial,${fontSize},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,3,10,2,8,10,10,${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
