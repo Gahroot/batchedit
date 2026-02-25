@@ -4,12 +4,14 @@ import { Play, Loader2, CheckCircle, AlertCircle, Captions } from 'lucide-react'
 import { useStore, RenderProgress } from '../store'
 import { useWhisper } from '@/hooks/useWhisper'
 import { WhisperStatus } from './WhisperStatus'
+import { ErrorLog } from './ErrorLog'
 import { cn } from '../lib/utils'
 import { v4 as uuidv4 } from 'uuid'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { Switch } from '@/components/ui/switch'
+import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip'
 import {
   Select,
   SelectTrigger,
@@ -31,6 +33,8 @@ export function RenderPanel() {
   const setIsRendering = useStore((s) => s.setIsRendering)
   const captionProgress = useStore((s) => s.captionProgress)
   const setCaptionProgress = useStore((s) => s.setCaptionProgress)
+  const addError = useStore((s) => s.addError)
+  const clearErrors = useStore((s) => s.clearErrors)
 
   const { loadModel, transcribe, isModelLoading, isModelReady, isTranscribing, loadProgress } =
     useWhisper()
@@ -55,6 +59,7 @@ export function RenderPanel() {
 
     setIsRendering(true)
     setShowProgress(true)
+    clearErrors()
 
     // Caption transcription cache (keyed by clip path)
     const transcriptionCache: Record<
@@ -63,9 +68,10 @@ export function RenderPanel() {
     > = {}
 
     if (autoCaptions) {
-      try {
-        // Load model if needed
-        if (!isModelReady) {
+      // Load model first — if this fails, skip all captions
+      let modelLoaded = isModelReady
+      if (!modelLoaded) {
+        try {
           setCaptionProgress({
             stage: 'loading-model',
             currentClip: '',
@@ -73,8 +79,16 @@ export function RenderPanel() {
             totalClips: 0
           })
           await loadModel()
+          modelLoaded = true
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          console.error('Whisper model loading failed:', err)
+          addError({ source: 'caption', clipName: 'Whisper Model', message: msg })
+          setCaptionProgress(null)
         }
+      }
 
+      if (modelLoaded) {
         // Get all unique clip paths
         const allClipPaths = new Set<string>()
         hooks.forEach((c) => allClipPaths.add(c.path))
@@ -84,7 +98,7 @@ export function RenderPanel() {
         const uniquePaths = Array.from(allClipPaths)
         let completed = 0
 
-        // Transcribe each unique clip
+        // Transcribe each unique clip independently
         for (const clipPath of uniquePaths) {
           const clipName = clipPath.split(/[/\\]/).pop() || 'Unknown'
           setCaptionProgress({
@@ -94,12 +108,17 @@ export function RenderPanel() {
             totalClips: uniquePaths.length
           })
 
-          // Extract audio, read buffer, transcribe
-          const wavPath = await window.api.extractAudio(clipPath)
-          const audioBuffer = await window.api.readAudioBuffer(wavPath)
-          const audioData = new Float32Array(audioBuffer)
-          const chunks = await transcribe(audioData)
-          transcriptionCache[clipPath] = chunks
+          try {
+            const wavPath = await window.api.extractAudio(clipPath)
+            const audioBuffer = await window.api.readAudioBuffer(wavPath)
+            const audioData = new Float32Array(audioBuffer)
+            const chunks = await transcribe(audioData)
+            transcriptionCache[clipPath] = chunks
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            console.error(`Transcription failed for ${clipName}:`, err)
+            addError({ source: 'caption', clipName, message: msg })
+          }
 
           completed++
         }
@@ -110,10 +129,6 @@ export function RenderPanel() {
           completedClips: completed,
           totalClips: uniquePaths.length
         })
-      } catch (err) {
-        console.error('Caption generation failed:', err)
-        setCaptionProgress(null)
-        // Continue with render without captions
       }
     }
 
@@ -187,6 +202,21 @@ export function RenderPanel() {
     } catch (err) {
       console.error('Render failed:', err)
     } finally {
+      // Log any errored render jobs
+      const finalProgress = useStore.getState().renderProgress
+      for (const rp of finalProgress) {
+        if (rp.status === 'error') {
+          const job = jobs.find((j) => j.id === rp.jobId)
+          const outputName = job
+            ? job.outputPath.split(/[/\\]/).pop() || rp.jobId
+            : rp.jobId
+          addError({
+            source: 'render',
+            clipName: outputName,
+            message: rp.error || 'Unknown render error'
+          })
+        }
+      }
       setIsRendering(false)
     }
   }
@@ -225,36 +255,56 @@ export function RenderPanel() {
             </div>
 
             {/* Individual Job Progress */}
+            <TooltipProvider>
             <div className="max-h-32 overflow-y-auto space-y-1">
-              {renderProgress.map((rp) => (
-                <div key={rp.jobId} className="flex items-center gap-2 text-[10px]">
-                  {rp.status === 'done' ? (
-                    <CheckCircle className="w-3 h-3 text-green-500 shrink-0" />
-                  ) : rp.status === 'error' ? (
-                    <AlertCircle className="w-3 h-3 text-destructive shrink-0" />
-                  ) : rp.status === 'rendering' ? (
-                    <Loader2 className="w-3 h-3 animate-spin text-primary shrink-0" />
-                  ) : (
-                    <div className="w-3 h-3 rounded-full border border-border shrink-0" />
-                  )}
-                  <div className="flex-1 h-1 rounded-full bg-secondary overflow-hidden">
-                    <div
-                      className={cn(
-                        'h-full rounded-full transition-all',
-                        rp.status === 'error' ? 'bg-destructive' : 'bg-primary'
-                      )}
-                      style={{ width: `${rp.percent}%` }}
-                    />
+              {renderProgress.map((rp) => {
+                const row = (
+                  <div key={rp.jobId} className="flex items-center gap-2 text-[10px]">
+                    {rp.status === 'done' ? (
+                      <CheckCircle className="w-3 h-3 text-green-500 shrink-0" />
+                    ) : rp.status === 'error' ? (
+                      <AlertCircle className="w-3 h-3 text-destructive shrink-0" />
+                    ) : rp.status === 'rendering' ? (
+                      <Loader2 className="w-3 h-3 animate-spin text-primary shrink-0" />
+                    ) : (
+                      <div className="w-3 h-3 rounded-full border border-border shrink-0" />
+                    )}
+                    <div className="flex-1 h-1 rounded-full bg-secondary overflow-hidden">
+                      <div
+                        className={cn(
+                          'h-full rounded-full transition-all',
+                          rp.status === 'error' ? 'bg-destructive' : 'bg-primary'
+                        )}
+                        style={{ width: `${rp.percent}%` }}
+                      />
+                    </div>
+                    <span className="font-mono text-muted-foreground w-10 text-right">
+                      {rp.status === 'error' ? 'ERR' : `${Math.round(rp.percent)}%`}
+                    </span>
                   </div>
-                  <span className="font-mono text-muted-foreground w-10 text-right">
-                    {Math.round(rp.percent)}%
-                  </span>
-                </div>
-              ))}
+                )
+
+                if (rp.status === 'error' && rp.error) {
+                  return (
+                    <Tooltip key={rp.jobId}>
+                      <TooltipTrigger asChild>{row}</TooltipTrigger>
+                      <TooltipContent side="top" className="max-w-xs text-xs">
+                        {rp.error}
+                      </TooltipContent>
+                    </Tooltip>
+                  )
+                }
+
+                return row
+              })}
             </div>
+            </TooltipProvider>
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Error Log */}
+      <ErrorLog />
 
       {/* Whisper Status */}
       {autoCaptions && (

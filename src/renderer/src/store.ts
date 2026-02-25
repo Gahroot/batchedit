@@ -30,6 +30,14 @@ export interface CaptionProgress {
   totalClips: number
 }
 
+export interface ErrorLogEntry {
+  id: string
+  timestamp: number
+  source: 'caption' | 'render'
+  clipName: string
+  message: string
+}
+
 interface AppState {
   // Buckets
   hooks: Clip[]
@@ -49,6 +57,11 @@ interface AppState {
   // Caption state
   captionProgress: CaptionProgress | null
   setCaptionProgress: (progress: CaptionProgress | null) => void
+
+  // Error log
+  errorLog: ErrorLogEntry[]
+  addError: (entry: Omit<ErrorLogEntry, 'id' | 'timestamp'>) => void
+  clearErrors: () => void
 
   // Actions
   addClips: (bucket: BucketType, clips: Clip[]) => void
@@ -84,8 +97,19 @@ export const useStore = create<AppState>((set, get) => ({
   renderProgress: [],
   isRendering: false,
   captionProgress: null,
+  errorLog: [],
 
   setCaptionProgress: (progress) => set({ captionProgress: progress }),
+
+  addError: (entry) =>
+    set((state) => ({
+      errorLog: [
+        ...state.errorLog,
+        { ...entry, id: uuidv4(), timestamp: Date.now() }
+      ]
+    })),
+
+  clearErrors: () => set({ errorLog: [] }),
 
   addClips: (bucket, clips) =>
     set((state) => ({
@@ -137,6 +161,7 @@ export const useStore = create<AppState>((set, get) => ({
       ctas: [],
       hookTexts: {},
       renderProgress: [],
-      isRendering: false
+      isRendering: false,
+      errorLog: []
     })
 }))
