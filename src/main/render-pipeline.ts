@@ -374,8 +374,8 @@ export function generateWordHighlightAssFile(
   const { width, height } = resolution
   const fontSize = Math.round(height * 0.05)
   const isVertical916 = width * 16 <= height * 9
-  // 9:16: just below center (40% up from bottom); others: near bottom (5%)
-  const marginV = isVertical916 ? Math.round(height * 0.80) : Math.round(height * 0.05)
+  // 9:16: just below center (~65% from top); others: near bottom (5%)
+  const marginV = isVertical916 ? Math.round(height * 0.35) : Math.round(height * 0.05)
   const fontName = style?.fontName || 'Arial'
   const highlightBgr = style ? cssHexToAssBgr(style.highlightColor) : '&H0000FFFF'
 
@@ -448,7 +448,7 @@ function generateTextOverlayAssFile(
   const { width, height } = resolution
   const fontSize = Math.round(height * 0.035)
   const isVertical916 = width * 16 <= height * 9
-  const marginV = isVertical916 ? Math.round(height * 0.08) : Math.round(height * 0.03)
+  const marginV = isVertical916 ? Math.round(height * 0.12) : Math.round(height * 0.03)
 
   // Estimate box dimensions based on text length and font size
   const charWidth = fontSize * 0.55
@@ -484,7 +484,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TextOverlay,Arial,${fontSize},&H00000000,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,8,10,10,${marginV},1
+Style: TextOverlay,Arial,${fontSize},&H00000000,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,10,10,${marginV},1
 Style: TextBox,Arial,${fontSize},&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
 
 [Events]
@@ -496,8 +496,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
 
   // Layer 0: white rounded-rect background drawn at absolute position
   const bgLine = `Dialogue: 0,${start},${end},TextBox,,0,0,0,,{\\pos(${boxX},${boxY})\\p1}${roundedRect}{\\p0}`
-  // Layer 1: black text on top
-  const textLine = `Dialogue: 1,${start},${end},TextOverlay,,0,0,0,,${escaped}`
+  // Layer 1: black text centered in the box
+  const textPosX = Math.round(width / 2)
+  const textPosY = Math.round(boxY + boxH / 2)
+  const textLine = `Dialogue: 1,${start},${end},TextOverlay,,0,0,0,,{\\pos(${textPosX},${textPosY})}${escaped}`
 
   return header + '\n' + bgLine + '\n' + textLine + '\n'
 }
