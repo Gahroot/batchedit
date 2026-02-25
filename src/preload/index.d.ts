@@ -20,6 +20,7 @@ interface RenderJob {
   ctaPath: string
   outputPath: string
   textOverlay?: string
+  hookDurationSec?: number
   captionsAssPath?: string
   resolution: { width: number; height: number }
 }

@@ -164,6 +164,7 @@ export function RenderPanel() {
         const hookText = hookTexts[combo.hook.id]
         if (hookText && hookText.trim()) {
           job.textOverlay = hookText.trim()
+          job.hookDurationSec = combo.hook.duration
         }
 
         // Add captions if available

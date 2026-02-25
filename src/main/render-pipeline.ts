@@ -12,6 +12,7 @@ export interface RenderJob {
   ctaPath: string
   outputPath: string
   textOverlay?: string
+  hookDurationSec?: number
   captionsAssPath?: string
   resolution: { width: number; height: number }
 }
@@ -42,34 +43,34 @@ function concatWithNormalization(
       `[v0][0:a][v1][1:a][v2][2:a]concat=n=3:v=1:a=1[vout][aout]`
     ]
 
-    // Add text overlay on hook segment if specified
-    if (job.textOverlay) {
-      const escapedText = job.textOverlay
-        .replace(/\\/g, '\\\\\\\\')
-        .replace(/'/g, "\\\\\\'")
-        .replace(/:/g, '\\\\:')
-        .replace(/%/g, '%%')
+    // Track temp ASS files to clean up after render
+    const tempAssFiles: string[] = []
+    let currentLabel = '[vout]'
 
-      filters.push(
-        `[vout]drawtext=text='${escapedText}':` +
-          `fontcolor=white:fontsize=60:` +
-          `x=(w-text_w)/2:y=(h-text_h)/2:` +
-          `box=1:boxcolor=black@0.5:boxborderw=10:` +
-          `shadowcolor=black:shadowx=2:shadowy=2[vtxt]`
+    // Add text overlay on hook segment via ASS (drawtext not available in ffmpeg-static)
+    if (job.textOverlay && job.hookDurationSec) {
+      const assContent = generateTextOverlayAssFile(
+        job.textOverlay,
+        job.hookDurationSec,
+        job.resolution
       )
+      const assPath = join(tmpdir(), `batchedit-textoverlay-${uuidv4()}.ass`)
+      writeFileSync(assPath, assContent, 'utf-8')
+      tempAssFiles.push(assPath)
+
+      const escaped = assPath.replace(/\\/g, '/').replace(/:/g, '\\:')
+      filters.push(`${currentLabel}ass=${escaped}[vtxt]`)
+      currentLabel = '[vtxt]'
     }
 
     // Add ASS captions if provided
     if (job.captionsAssPath) {
-      const escapedPath = job.captionsAssPath.replace(/:/g, '\\\\:').replace(/\\/g, '/')
-      const inputLabel = job.textOverlay ? '[vtxt]' : '[vout]'
-      filters.push(`${inputLabel}ass=${escapedPath}[vfinal]`)
+      const escaped = job.captionsAssPath.replace(/\\/g, '/').replace(/:/g, '\\:')
+      filters.push(`${currentLabel}ass=${escaped}[vfinal]`)
+      currentLabel = '[vfinal]'
     }
 
-    // Determine final video output label
-    let finalVideoLabel = '[vout]'
-    if (job.captionsAssPath) finalVideoLabel = '[vfinal]'
-    else if (job.textOverlay) finalVideoLabel = '[vtxt]'
+    const finalVideoLabel = currentLabel
 
     const command = ffmpeg()
       .input(job.hookPath)
@@ -97,8 +98,14 @@ function concatWithNormalization(
       .on('progress', (progress) => {
         onProgress(progress.percent || 0)
       })
-      .on('end', () => resolve())
-      .on('error', (err) => reject(err))
+      .on('end', () => {
+        tempAssFiles.forEach((f) => { try { unlinkSync(f) } catch {} })
+        resolve()
+      })
+      .on('error', (err) => {
+        tempAssFiles.forEach((f) => { try { unlinkSync(f) } catch {} })
+        reject(err)
+      })
 
     command.save(job.outputPath)
   })
@@ -163,37 +170,7 @@ export function setupRenderPipeline(): void {
   // Read WAV file and return PCM Float32Array for Whisper
   ipcMain.handle('ffmpeg:readAudioBuffer', async (_event, wavPath: string) => {
     const buffer = readFileSync(wavPath)
-
-    // Parse WAV header to find data chunk
-    // Standard RIFF WAV: 'RIFF' + size + 'WAVE' + chunks
-    let offset = 12 // Skip RIFF header
-    let dataOffset = 0
-    let dataSize = 0
-
-    while (offset < buffer.length) {
-      const chunkId = buffer.toString('ascii', offset, offset + 4)
-      const chunkSize = buffer.readUInt32LE(offset + 4)
-
-      if (chunkId === 'data') {
-        dataOffset = offset + 8
-        dataSize = chunkSize
-        break
-      }
-      offset += 8 + chunkSize
-      // WAV chunks are word-aligned
-      if (chunkSize % 2 !== 0) offset++
-    }
-
-    if (dataOffset === 0) throw new Error('No data chunk found in WAV file')
-
-    // Convert 16-bit PCM to Float32
-    const int16 = new Int16Array(buffer.buffer, buffer.byteOffset + dataOffset, dataSize / 2)
-    const float32 = new Float32Array(int16.length)
-    for (let i = 0; i < int16.length; i++) {
-      float32[i] = int16[i] / 32768
-    }
-
-    return float32.buffer
+    return parseWavToFloat32(buffer).buffer
   })
 
   // Thumbnail generation
@@ -280,7 +257,7 @@ export function setupRenderPipeline(): void {
   )
 }
 
-function generateAssFile(
+export function generateAssFile(
   captions: { text: string; start: number; end: number }[],
   resolution: { width: number; height: number }
 ): string {
@@ -311,7 +288,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
   return header + '\n' + dialogueLines.join('\n') + '\n'
 }
 
-function formatAssTimestamp(ms: number): string {
+export function formatAssTimestamp(ms: number): string {
   const h = Math.floor(ms / 3600000)
   const m = Math.floor((ms % 3600000) / 60000)
   const s = Math.floor((ms % 60000) / 1000)
@@ -319,7 +296,7 @@ function formatAssTimestamp(ms: number): string {
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`
 }
 
-function generateWordHighlightAssFile(
+export function generateWordHighlightAssFile(
   wordChunks: { text: string; start: number; end: number }[],
   resolution: { width: number; height: number }
 ): string {
@@ -366,7 +343,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
   return header + '\n' + dialogueLines.join('\n') + '\n'
 }
 
-function generateCombinedAssFile(
+export function generateCombinedAssFile(
   segments: { wordChunks: { text: string; start: number; end: number }[]; offsetMs: number }[],
   resolution: { width: number; height: number }
 ): string {
@@ -385,4 +362,67 @@ function generateCombinedAssFile(
   }
 
   return generateWordHighlightAssFile(allChunks, resolution)
+}
+
+function generateTextOverlayAssFile(
+  text: string,
+  durationSec: number,
+  resolution: { width: number; height: number }
+): string {
+  const { width, height } = resolution
+  const fontSize = Math.round(height * 0.035)
+
+  // ASS colours: &HAABBGGRR
+  // BorderStyle 3 = opaque box; BackColour is the box fill
+  const header = `[Script Info]
+ScriptType: v4.00+
+PlayResX: ${width}
+PlayResY: ${height}
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: TextOverlay,Arial,${fontSize},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,3,10,2,5,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
+
+  const start = formatAssTimestamp(0)
+  const end = formatAssTimestamp(durationSec * 1000)
+  const escaped = text.replace(/\n/g, '\\N')
+
+  return header + '\n' + `Dialogue: 0,${start},${end},TextOverlay,,0,0,0,,${escaped}` + '\n'
+}
+
+export function parseWavToFloat32(buffer: Buffer): Float32Array {
+  // Parse WAV header to find data chunk
+  // Standard RIFF WAV: 'RIFF' + size + 'WAVE' + chunks
+  let offset = 12 // Skip RIFF header
+  let dataOffset = 0
+  let dataSize = 0
+
+  while (offset < buffer.length) {
+    const chunkId = buffer.toString('ascii', offset, offset + 4)
+    const chunkSize = buffer.readUInt32LE(offset + 4)
+
+    if (chunkId === 'data') {
+      dataOffset = offset + 8
+      dataSize = chunkSize
+      break
+    }
+    offset += 8 + chunkSize
+    // WAV chunks are word-aligned
+    if (chunkSize % 2 !== 0) offset++
+  }
+
+  if (dataOffset === 0) throw new Error('No data chunk found in WAV file')
+
+  // Convert 16-bit PCM to Float32
+  const int16 = new Int16Array(buffer.buffer, buffer.byteOffset + dataOffset, dataSize / 2)
+  const float32 = new Float32Array(int16.length)
+  for (let i = 0; i < int16.length; i++) {
+    float32[i] = int16[i] / 32768
+  }
+
+  return float32
 }

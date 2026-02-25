@@ -9,9 +9,12 @@ class PipelineFactory {
       const { pipeline } = await import('@huggingface/transformers')
       this.instance = await pipeline(
         'automatic-speech-recognition',
-        'onnx-community/whisper-tiny.en',
+        'onnx-community/whisper-tiny.en_timestamped',
         {
-          dtype: 'q4',
+          dtype: {
+            encoder_model: 'fp32',
+            decoder_model_merged: 'q4'
+          },
           device: 'wasm',
           progress_callback: progressCallback
         }
