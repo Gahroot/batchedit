@@ -7,7 +7,11 @@ const __dirname_esm = dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()]
+    plugins: [
+      externalizeDepsPlugin({
+        exclude: ['fluent-ffmpeg', 'uuid', '@google/generative-ai']
+      })
+    ]
   },
   preload: {
     plugins: [externalizeDepsPlugin()]

@@ -12,7 +12,7 @@ function formatTime(ts: number): string {
 
 function formatEntry(entry: ErrorLogEntry): string {
   const time = formatTime(entry.timestamp)
-  const src = entry.source === 'caption' ? 'CAP' : 'REN'
+  const src = entry.source === 'caption' ? 'CAP' : entry.source === 'hooktext' ? 'AI' : 'REN'
   return `[${time}] [${src}] ${entry.clipName}: ${entry.message}`
 }
 
@@ -73,7 +73,7 @@ export function ErrorLog() {
                     variant="outline"
                     className="text-[9px] px-1 py-0 shrink-0 font-mono border-destructive/40"
                   >
-                    {entry.source === 'caption' ? 'CAP' : 'REN'}
+                    {entry.source === 'caption' ? 'CAP' : entry.source === 'hooktext' ? 'AI' : 'REN'}
                   </Badge>
                   <span className="text-muted-foreground shrink-0 font-mono">
                     {formatTime(entry.timestamp)}

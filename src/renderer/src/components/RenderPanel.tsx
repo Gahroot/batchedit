@@ -153,7 +153,11 @@ export function RenderPanel() {
     const jobs = await Promise.all(
       toRender.map(async (combo, idx) => {
         const id = uuidv4()
-        const outputName = `${combo.hook.name.replace(/\.[^.]+$/, '')}_${combo.meat.name.replace(/\.[^.]+$/, '')}_${combo.cta.name.replace(/\.[^.]+$/, '')}_${idx + 1}.mp4`
+        const hookText = hookTexts[combo.hook.id]
+        const hookLabel = hookText && hookText.trim()
+          ? hookText.trim().replace(/[<>:"/\\|?*]+/g, '').replace(/\s+/g, ' ')
+          : combo.hook.name.replace(/\.[^.]+$/, '')
+        const outputName = `${hookLabel}_${combo.meat.name.replace(/\.[^.]+$/, '')}_${combo.cta.name.replace(/\.[^.]+$/, '')}_${idx + 1}.mp4`
 
         const job: any = {
           id,
@@ -166,7 +170,6 @@ export function RenderPanel() {
         }
 
         // Add text overlay if defined
-        const hookText = hookTexts[combo.hook.id]
         if (hookText && hookText.trim()) {
           job.textOverlay = hookText.trim()
           job.hookDurationSec = combo.hook.duration

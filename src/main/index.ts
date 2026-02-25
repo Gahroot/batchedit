@@ -1,8 +1,25 @@
-import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, clipboard } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupFFmpeg } from './ffmpeg'
 import { setupRenderPipeline } from './render-pipeline'
+
+// Show copyable error dialog for uncaught exceptions
+process.on('uncaughtException', (error) => {
+  const detail = `${error.message}\n\n${error.stack || ''}`
+  const choice = dialog.showMessageBoxSync({
+    type: 'error',
+    title: 'Error',
+    message: 'A JavaScript error occurred in the main process',
+    detail,
+    buttons: ['Copy Error & Close', 'Close'],
+    defaultId: 0
+  })
+  if (choice === 0) {
+    clipboard.writeText(detail)
+  }
+  app.exit(1)
+})
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -65,6 +82,22 @@ app.whenReady().then(() => {
     })
     return result.filePaths[0] || null
   })
+
+  // IPC: Generate hook text via Gemini AI
+  ipcMain.handle(
+    'ai:generateHookText',
+    async (_event, apiKey: string, transcript: string): Promise<string> => {
+      const { GoogleGenerativeAI } = await import('@google/generative-ai')
+      const genAI = new GoogleGenerativeAI(apiKey)
+      const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' })
+
+      const result = await model.generateContent(
+        `You are a direct-response advertising copywriter. Given the transcript of a short video hook clip, generate punchy on-screen text (1-5 words) that would grab attention when overlaid on the video. The text should be a bold hook phrase, NOT a summary. Return ONLY the text, no quotes, no explanation.\n\nTranscript: "${transcript}"`
+      )
+
+      return result.response.text().trim()
+    }
+  )
 
   createWindow()
 

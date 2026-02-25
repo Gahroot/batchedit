@@ -1,6 +1,7 @@
 import { useStore, RESOLUTIONS } from '../store'
-import { Settings, Monitor, FolderOpen } from 'lucide-react'
+import { Settings, Monitor, FolderOpen, Key, ExternalLink } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectTrigger,
@@ -13,6 +14,8 @@ export function SettingsBar() {
   const settings = useStore((s) => s.settings)
   const setResolution = useStore((s) => s.setResolution)
   const setOutputDirectory = useStore((s) => s.setOutputDirectory)
+  const geminiApiKey = useStore((s) => s.geminiApiKey)
+  const setGeminiApiKey = useStore((s) => s.setGeminiApiKey)
 
   const handleChooseOutput = async () => {
     const dir = await window.api.openDirectory()
@@ -56,6 +59,27 @@ export function SettingsBar() {
           {settings.outputDirectory
             ? settings.outputDirectory.split(/[/\\]/).pop()
             : 'Choose Output Folder'}
+        </Button>
+      </div>
+
+      {/* Gemini API Key */}
+      <div className="flex items-center gap-2 ml-auto">
+        <Key className="w-3.5 h-3.5 text-muted-foreground" />
+        <Input
+          type="password"
+          placeholder="Gemini API Key"
+          value={geminiApiKey}
+          onChange={(e) => setGeminiApiKey(e.target.value)}
+          className="h-7 w-48 text-xs px-2"
+        />
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 text-xs gap-1 px-2 text-muted-foreground"
+          onClick={() => window.open('https://aistudio.google.com/apikey', '_blank')}
+        >
+          <ExternalLink className="w-3 h-3" />
+          Get Key
         </Button>
       </div>
     </div>

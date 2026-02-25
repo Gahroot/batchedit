@@ -1,6 +1,6 @@
 import { ipcMain, app } from 'electron'
 import { ffmpeg, getVideoMetadata, extractAudio } from './ffmpeg'
-import { join } from 'path'
+import { join, normalize } from 'path'
 import { writeFileSync, mkdirSync, unlinkSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { v4 as uuidv4 } from 'uuid'
@@ -10,6 +10,12 @@ function getFontsDir(): string {
     return join(process.resourcesPath, 'fonts')
   }
   return join(app.getAppPath(), 'resources', 'fonts')
+}
+
+/** Escape a file path for use inside an FFmpeg filter option value.
+ *  Uses single-quote wrapping (FFmpeg filter syntax) to protect colons in Windows drive letters. */
+function escapeFilterPath(p: string): string {
+  return "'" + p.replace(/\\/g, '/').replace(/'/g, "'\\''") + "'"
 }
 
 function cssHexToAssBgr(hex: string): string {
@@ -45,6 +51,12 @@ function concatWithNormalization(
   onProgress: (percent: number) => void
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    // Normalize paths for Windows compatibility (mixed separators cause EINVAL)
+    const hookPath = normalize(job.hookPath)
+    const meatPath = normalize(job.meatPath)
+    const ctaPath = normalize(job.ctaPath)
+    const outputPath = normalize(job.outputPath)
+
     const { width, height } = job.resolution
 
     // Build filter graph: normalize each input then concat
@@ -77,15 +89,15 @@ function concatWithNormalization(
       writeFileSync(assPath, assContent, 'utf-8')
       tempAssFiles.push(assPath)
 
-      const escaped = assPath.replace(/\\/g, '/').replace(/:/g, '\\:')
+      const escaped = escapeFilterPath(assPath)
       filters.push(`${currentLabel}ass=${escaped}[vtxt]`)
       currentLabel = '[vtxt]'
     }
 
     // Add ASS captions if provided (with fontsdir for bundled fonts)
     if (job.captionsAssPath) {
-      const escaped = job.captionsAssPath.replace(/\\/g, '/').replace(/:/g, '\\:')
-      const fontsDir = getFontsDir().replace(/\\/g, '/').replace(/:/g, '\\:')
+      const escaped = escapeFilterPath(job.captionsAssPath)
+      const fontsDir = escapeFilterPath(getFontsDir())
       filters.push(`${currentLabel}ass=${escaped}:fontsdir=${fontsDir}[vfinal]`)
       currentLabel = '[vfinal]'
     }
@@ -93,11 +105,12 @@ function concatWithNormalization(
     const finalVideoLabel = currentLabel
 
     const command = ffmpeg()
-      .input(job.hookPath)
-      .input(job.meatPath)
-      .input(job.ctaPath)
+      .input(hookPath)
+      .input(meatPath)
+      .input(ctaPath)
       .complexFilter(filters.join(';'))
       .outputOptions([
+        '-y',
         '-map',
         finalVideoLabel,
         '-map',
@@ -115,6 +128,9 @@ function concatWithNormalization(
         '-movflags',
         '+faststart'
       ])
+      .on('start', (commandLine) => {
+        console.log(`[FFmpeg] ${commandLine}`)
+      })
       .on('progress', (progress) => {
         onProgress(progress.percent || 0)
       })
@@ -122,12 +138,13 @@ function concatWithNormalization(
         tempAssFiles.forEach((f) => { try { unlinkSync(f) } catch {} })
         resolve()
       })
-      .on('error', (err) => {
+      .on('error', (err, _stdout, stderr) => {
+        if (stderr) console.error(`[FFmpeg] stderr:\n${stderr}`)
         tempAssFiles.forEach((f) => { try { unlinkSync(f) } catch {} })
-        reject(err)
+        reject(new Error(stderr ? `${err.message}\nFFmpeg output:\n${stderr}` : err.message))
       })
 
-    command.save(job.outputPath)
+    command.save(outputPath)
   })
 }
 
@@ -403,8 +420,32 @@ function generateTextOverlayAssFile(
   const isVertical916 = width * 16 <= height * 9
   const marginV = isVertical916 ? Math.round(height * 0.08) : Math.round(height * 0.03)
 
-  // ASS colours: &HAABBGGRR
-  // BorderStyle 3 = opaque box; BackColour is the box fill
+  // Estimate box dimensions based on text length and font size
+  const charWidth = fontSize * 0.55
+  const textWidth = Math.round(text.length * charWidth)
+  const padX = Math.round(fontSize * 0.6)
+  const padY = Math.round(fontSize * 0.35)
+  const boxW = textWidth + padX * 2
+  const boxH = fontSize + padY * 2
+  const r = 33 // corner radius
+
+  // Position: top-center, offset by marginV from top (alignment 8)
+  const boxX = Math.round((width - boxW) / 2)
+  const boxY = marginV
+
+  // ASS \p1 drawing for rounded rectangle (relative coordinates)
+  // m = moveto, l = lineto, b = cubic bezier
+  const roundedRect =
+    `m ${r} 0 ` +
+    `l ${boxW - r} 0 ` +
+    `b ${boxW} 0 ${boxW} 0 ${boxW} ${r} ` +
+    `l ${boxW} ${boxH - r} ` +
+    `b ${boxW} ${boxH} ${boxW} ${boxH} ${boxW - r} ${boxH} ` +
+    `l ${r} ${boxH} ` +
+    `b 0 ${boxH} 0 ${boxH} 0 ${boxH - r} ` +
+    `l 0 ${r} ` +
+    `b 0 0 0 0 ${r} 0`
+
   const header = `[Script Info]
 ScriptType: v4.00+
 PlayResX: ${width}
@@ -413,7 +454,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TextOverlay,Arial,${fontSize},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,3,10,2,8,10,10,${marginV},1
+Style: TextOverlay,Arial,${fontSize},&H00000000,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,8,10,10,${marginV},1
+Style: TextBox,Arial,${fontSize},&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
@@ -422,7 +464,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
   const end = formatAssTimestamp(durationSec * 1000)
   const escaped = text.replace(/\n/g, '\\N')
 
-  return header + '\n' + `Dialogue: 0,${start},${end},TextOverlay,,0,0,0,,${escaped}` + '\n'
+  // Layer 0: white rounded-rect background drawn at absolute position
+  const bgLine = `Dialogue: 0,${start},${end},TextBox,,0,0,0,,{\\pos(${boxX},${boxY})\\p1}${roundedRect}{\\p0}`
+  // Layer 1: black text on top
+  const textLine = `Dialogue: 1,${start},${end},TextOverlay,,0,0,0,,${escaped}`
+
+  return header + '\n' + bgLine + '\n' + textLine + '\n'
 }
 
 export function parseWavToFloat32(buffer: Buffer): Float32Array {

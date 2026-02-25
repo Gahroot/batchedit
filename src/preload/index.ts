@@ -26,6 +26,10 @@ const api = {
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   readAudioBuffer: (wavPath: string) => ipcRenderer.invoke('ffmpeg:readAudioBuffer', wavPath),
 
+  // AI
+  generateHookText: (apiKey: string, transcript: string) =>
+    ipcRenderer.invoke('ai:generateHookText', apiKey, transcript),
+
   // Rendering
   renderBatch: (jobs: any[]) => ipcRenderer.invoke('render:batch', jobs),
   onRenderProgress: (callback: (progress: any[]) => void) => {

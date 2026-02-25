@@ -58,6 +58,7 @@ interface Api {
     resolution: { width: number; height: number }
     captionStyle?: CaptionStyleOptions
   }) => Promise<string>
+  generateHookText: (apiKey: string, transcript: string) => Promise<string>
   renderBatch: (jobs: RenderJob[]) => Promise<RenderProgress[]>
   onRenderProgress: (callback: (progress: RenderProgress[]) => void) => () => void
 }

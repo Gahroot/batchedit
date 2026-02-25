@@ -24,6 +24,7 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@ffprobe-installer/ffprobe": "^2.1.2",
+    "@google/generative-ai": "^0.24.1",
     "@huggingface/transformers": "^3.4.0",
     "@radix-ui/react-progress": "^1.1.8",
     "@radix-ui/react-scroll-area": "^1.2.10",
@@ -75,7 +76,20 @@
       "node_modules/@ffprobe-installer/**"
     ],
     "extraResources": [
-      { "from": "resources/fonts", "to": "fonts", "filter": ["**/*.ttf"] }
+      {
+        "from": "resources/fonts",
+        "to": "fonts",
+        "filter": [
+          "**/*.ttf"
+        ]
+      },
+      {
+        "from": "resources/bin",
+        "to": "bin",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "directories": {
       "buildResources": "build"

@@ -30,10 +30,17 @@ export interface CaptionProgress {
   totalClips: number
 }
 
+export interface HookTextProgress {
+  stage: 'loading-model' | 'transcribing' | 'generating'
+  currentClip: string
+  completedClips: number
+  totalClips: number
+}
+
 export interface ErrorLogEntry {
   id: string
   timestamp: number
-  source: 'caption' | 'render'
+  source: 'caption' | 'render' | 'hooktext'
   clipName: string
   message: string
 }
@@ -79,6 +86,12 @@ interface AppState {
   setCaptionStyle: (style: CaptionStyle) => void
   setHighlightColor: (color: string) => void
 
+  // Gemini AI
+  geminiApiKey: string
+  setGeminiApiKey: (key: string) => void
+  hookTextProgress: HookTextProgress | null
+  setHookTextProgress: (progress: HookTextProgress | null) => void
+
   // Error log
   errorLog: ErrorLogEntry[]
   addError: (entry: Omit<ErrorLogEntry, 'id' | 'timestamp'>) => void
@@ -119,6 +132,8 @@ export const useStore = create<AppState>((set, get) => ({
   isRendering: false,
   captionProgress: null,
   captionStyle: CAPTION_PRESETS.montserrat,
+  geminiApiKey: localStorage.getItem('batchedit-gemini-key') || '',
+  hookTextProgress: null,
   errorLog: [],
 
   setCaptionProgress: (progress) => set({ captionProgress: progress }),
@@ -128,6 +143,12 @@ export const useStore = create<AppState>((set, get) => ({
     set((state) => ({
       captionStyle: { ...state.captionStyle, highlightColor: color }
     })),
+
+  setGeminiApiKey: (key) => {
+    localStorage.setItem('batchedit-gemini-key', key)
+    set({ geminiApiKey: key })
+  },
+  setHookTextProgress: (progress) => set({ hookTextProgress: progress }),
 
   addError: (entry) =>
     set((state) => ({

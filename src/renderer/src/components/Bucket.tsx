@@ -1,7 +1,8 @@
 import { useCallback, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, X, Type, FileVideo } from 'lucide-react'
+import { Plus, X, Type, FileVideo, Sparkles, Loader2 } from 'lucide-react'
 import { useStore, BucketType, Clip } from '../store'
+import { useWhisper } from '../hooks/useWhisper'
 import { cn } from '../lib/utils'
 import { v4 as uuidv4 } from 'uuid'
 import { Card, CardHeader, CardContent } from '@/components/ui/card'
@@ -22,6 +23,92 @@ import { SortableClip } from './SortableClip'
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mkv', '.webm']
 
+function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
+  const geminiApiKey = useStore((s) => s.geminiApiKey)
+  const hookTexts = useStore((s) => s.hookTexts)
+  const setHookText = useStore((s) => s.setHookText)
+  const setHookTextProgress = useStore((s) => s.setHookTextProgress)
+  const addError = useStore((s) => s.addError)
+  const isRendering = useStore((s) => s.isRendering)
+  const hookTextProgress = useStore((s) => s.hookTextProgress)
+  const { loadModel, transcribe } = useWhisper()
+  const [isGenerating, setIsGenerating] = useState(false)
+
+  const handleGenerate = async () => {
+    if (!geminiApiKey) {
+      addError({ source: 'hooktext', clipName: 'Setup', message: 'Gemini API key not set. Add it in the settings bar.' })
+      return
+    }
+
+    const emptyClips = clips.filter((c) => !hookTexts[c.id]?.trim())
+    if (emptyClips.length === 0) return
+
+    setIsGenerating(true)
+    const total = emptyClips.length
+
+    try {
+      // Load Whisper model
+      setHookTextProgress({ stage: 'loading-model', currentClip: '', completedClips: 0, totalClips: total })
+      await loadModel()
+
+      for (let i = 0; i < emptyClips.length; i++) {
+        const clip = emptyClips[i]
+
+        try {
+          // Transcribe
+          setHookTextProgress({ stage: 'transcribing', currentClip: clip.name, completedClips: i, totalClips: total })
+          const wavPath = await window.api.extractAudio(clip.path)
+          const audioBuffer = await window.api.readAudioBuffer(wavPath)
+          const float32 = new Float32Array(audioBuffer)
+          const chunks = await transcribe(float32)
+          const transcript = chunks.map((c) => c.text).join(' ').trim()
+
+          if (!transcript) {
+            addError({ source: 'hooktext', clipName: clip.name, message: 'Empty transcript — skipping' })
+            continue
+          }
+
+          // Generate hook text via Gemini
+          setHookTextProgress({ stage: 'generating', currentClip: clip.name, completedClips: i, totalClips: total })
+          const hookText = await window.api.generateHookText(geminiApiKey, transcript)
+          setHookText(clip.id, hookText)
+        } catch (err) {
+          addError({ source: 'hooktext', clipName: clip.name, message: err instanceof Error ? err.message : String(err) })
+        }
+      }
+    } catch (err) {
+      addError({ source: 'hooktext', clipName: 'Whisper', message: err instanceof Error ? err.message : String(err) })
+    } finally {
+      setHookTextProgress(null)
+      setIsGenerating(false)
+    }
+  }
+
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleGenerate}
+            disabled={isRendering || isGenerating || clips.length === 0}
+            className="h-7 text-xs gap-1"
+          >
+            {isGenerating || hookTextProgress ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              <Sparkles className="w-3 h-3" />
+            )}
+            Generate
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Auto-generate hook text with AI (Whisper + Gemini)</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 interface BucketProps {
   type: BucketType
   label: string
@@ -38,6 +125,7 @@ export function Bucket({ type, label, color }: BucketProps) {
   const hookTexts = useStore((s) => s.hookTexts)
   const setHookText = useStore((s) => s.setHookText)
   const isRendering = useStore((s) => s.isRendering)
+  const hookTextProgress = useStore((s) => s.hookTextProgress)
   const [isDragOver, setIsDragOver] = useState(false)
 
   const handleAddClips = useCallback(async () => {
@@ -100,17 +188,33 @@ export function Bucket({ type, label, color }: BucketProps) {
           <h2 className="font-medium text-sm">{label}</h2>
           <Badge variant="outline" className="font-mono text-xs">{clips.length}</Badge>
         </div>
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={handleAddClips}
-          disabled={isRendering}
-          className="h-7 text-xs gap-1"
-        >
-          <Plus className="w-3 h-3" />
-          Add
-        </Button>
+        <div className="flex items-center gap-1.5">
+          {type === 'hook' && <GenerateHookTextButton clips={clips} />}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleAddClips}
+            disabled={isRendering}
+            className="h-7 text-xs gap-1"
+          >
+            <Plus className="w-3 h-3" />
+            Add
+          </Button>
+        </div>
       </CardHeader>
+
+      {/* Hook text generation progress */}
+      {type === 'hook' && hookTextProgress && (
+        <div className="flex items-center gap-2 px-4 py-1.5 border-b border-border bg-primary/5 text-xs text-muted-foreground">
+          <Loader2 className="w-3 h-3 animate-spin text-primary" />
+          <span>
+            {hookTextProgress.stage === 'loading-model' && 'Loading Whisper model…'}
+            {hookTextProgress.stage === 'transcribing' && `Transcribing ${hookTextProgress.currentClip}…`}
+            {hookTextProgress.stage === 'generating' && `Generating text for ${hookTextProgress.currentClip}…`}
+          </span>
+          <span className="font-mono">{hookTextProgress.completedClips}/{hookTextProgress.totalClips}</span>
+        </div>
+      )}
 
       {/* Clips List */}
       <CardContent className="flex-1 p-0 overflow-hidden">

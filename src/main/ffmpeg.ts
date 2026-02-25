@@ -1,15 +1,64 @@
 import ffmpeg from 'fluent-ffmpeg'
-import ffmpegPath from 'ffmpeg-static'
-import { path as ffprobePath } from '@ffprobe-installer/ffprobe'
+import { app } from 'electron'
+import { join } from 'path'
+import { existsSync } from 'fs'
 
-export function setupFFmpeg(): void {
-  if (ffmpegPath) {
-    const correctedFfmpegPath = ffmpegPath.replace('app.asar', 'app.asar.unpacked')
-    ffmpeg.setFfmpegPath(correctedFfmpegPath)
+function resolveBinaryPath(name: string): string | null {
+  const ext = process.platform === 'win32' ? '.exe' : ''
+  const binary = `${name}${ext}`
+
+  // Production: check extraResources/bin
+  if (app.isPackaged) {
+    const resourceBin = join(process.resourcesPath, 'bin', binary)
+    if (existsSync(resourceBin)) return resourceBin
+
+    // Also check asar-unpacked node_modules (legacy)
+    const unpackedFfmpeg = join(
+      process.resourcesPath,
+      'app.asar.unpacked',
+      'node_modules',
+      name === 'ffmpeg' ? 'ffmpeg-static' : '@ffprobe-installer',
+      binary
+    )
+    if (existsSync(unpackedFfmpeg)) return unpackedFfmpeg
   }
 
-  const correctedFfprobePath = ffprobePath.replace('app.asar', 'app.asar.unpacked')
-  ffmpeg.setFfprobePath(correctedFfprobePath)
+  // Dev: use npm packages
+  try {
+    if (name === 'ffmpeg') {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const p = require('ffmpeg-static') as string | null
+      if (p) return p
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { path: p } = require('@ffprobe-installer/ffprobe') as { path: string }
+      if (p) return p
+    }
+  } catch {
+    // Package not available for this platform — fall through
+  }
+
+  return null
+}
+
+let ffmpegReady = false
+
+export function setupFFmpeg(): void {
+  const ffmpegBin = resolveBinaryPath('ffmpeg')
+  const ffprobeBin = resolveBinaryPath('ffprobe')
+
+  if (ffmpegBin) {
+    ffmpeg.setFfmpegPath(ffmpegBin)
+  }
+  if (ffprobeBin) {
+    ffmpeg.setFfprobePath(ffprobeBin)
+  }
+
+  ffmpegReady = !!(ffmpegBin && ffprobeBin)
+}
+
+export function isFFmpegAvailable(): boolean {
+  return ffmpegReady
 }
 
 export function getVideoMetadata(
