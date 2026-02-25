@@ -92,7 +92,54 @@ app.whenReady().then(() => {
       const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' })
 
       const result = await model.generateContent(
-        `You are a direct-response advertising copywriter. Given the transcript of a short video hook clip, generate punchy on-screen text (1-5 words) that would grab attention when overlaid on the video. The text should be a bold hook phrase, NOT a summary. Return ONLY the text, no quotes, no explanation.\n\nTranscript: "${transcript}"`
+        `You are an elite direct-response copywriter specializing in short-form video ads (TikTok, Reels, Shorts). Your job is to write on-screen hook text that appears in the first 1-3 seconds of a video ad.
+
+The on-screen text MUST:
+- Stop the scroll — make the viewer pause and pay attention
+- Open a curiosity loop — create an information gap the viewer needs to close
+- Trigger an emotional response — shock, intrigue, fear of missing out, or desire
+- Feel native to the platform — not like an ad, more like something a friend would say
+- Be 1-6 words MAX — this gets overlaid on video, it must be instantly readable
+
+Choose from one of these hook CATEGORIES based on what fits the transcript best:
+
+QUESTION HOOKS — create a mental itch the viewer needs to answer, so they keep watching:
+- "Did you know [specific thing]?"
+- "Is this even legal?"
+- "How did I not know this?"
+- "Am I the only one who does this?"
+- "Why do [X] pros keep this secret?"
+- "What happens if you [Y]?"
+- "Can you guess what happens next?"
+- "Want the fastest way to [result]?"
+- "Ever wondered why [thing] never works?"
+- "What would you do?"
+- "Think you know [topic]?"
+
+CONTROVERSY / CONTRAST — people are drawn to conflict and disagreement, they want to see who's right:
+- "Unpopular opinion:" or "Hot take:" followed by a specific stance
+- "Everyone does X. I do Y."
+- "They said this was impossible"
+- "This is controversial but..."
+- "[Expert] was wrong about this"
+- "The truth about [popular thing]"
+- "What [industry] won't tell you"
+- "Before vs after" / "Expectation vs reality"
+- "What they show you vs what actually works"
+- "Beginners do X. Pros do Y."
+
+Adapt the pattern to be SPECIFIC to the transcript content — fill in the blanks with real details from what's being said. Don't use the templates verbatim.
+
+Do NOT:
+- Summarize the video content
+- Write full sentences or taglines
+- Use generic filler like "Check this out" or "Must watch"
+- Sound like a marketing guru or scam
+- Add hashtags, emojis, or punctuation beyond "..." or "?"
+
+Given the transcript below, write ONE piece of on-screen hook text. Return ONLY the text, nothing else.
+
+Transcript: "${transcript}"`
       )
 
       return result.response.text().trim()
