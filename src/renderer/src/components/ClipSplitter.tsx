@@ -8,7 +8,8 @@ import {
   Play,
   FolderOpen,
   ArrowRight,
-  CheckCircle
+  CheckCircle,
+  Bug
 } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import { useWhisper, WhisperChunk } from '@/hooks/useWhisper'
@@ -70,6 +71,7 @@ export function ClipSplitter() {
   const [splitResults, setSplitResults] = useState<Array<{ label: string; bucket: string; outputPath: string }>>([])
   const [error, setError] = useState<string | null>(null)
   const [splitProgress, setSplitProgress] = useState(0)
+  const [showRawChunks, setShowRawChunks] = useState(false)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const dropRef = useRef<HTMLDivElement>(null)
@@ -88,6 +90,7 @@ export function ClipSplitter() {
       setSplitResults([])
       setError(null)
       setSplitProgress(0)
+      setShowRawChunks(false)
     }
   }, [open])
 
@@ -388,7 +391,7 @@ export function ClipSplitter() {
               </div>
             )}
 
-            <ScrollArea className="flex-1 min-h-0">
+            <ScrollArea className="max-h-40 min-h-0">
               <div className="space-y-1.5 pr-3">
                 {markers.map((m) => (
                   <div key={m.id} className="flex items-center gap-2 text-xs">
@@ -474,31 +477,79 @@ export function ClipSplitter() {
             {/* Transcript */}
             {wordChunks.length > 0 && (
               <div>
-                <span className="text-xs font-medium mb-1 block">Transcript</span>
-                <ScrollArea className="h-20 rounded-md border border-border p-2">
-                  <div className="flex flex-wrap gap-0.5">
-                    {wordChunks.map((chunk, idx) => {
-                      // Check if this word is part of a marker phrase
-                      const markerMatch = markers.find((m) =>
-                        m.markerChunkIndices.includes(idx)
-                      )
-                      return (
-                        <span
-                          key={idx}
-                          onClick={() => seekVideo(chunk.start)}
-                          className={cn(
-                            'text-xs cursor-pointer hover:underline rounded px-0.5',
-                            markerMatch
-                              ? cn('font-bold', BUCKET_COLORS_BG_LIGHT[markerMatch.bucket], BUCKET_COLORS_TEXT[markerMatch.bucket])
-                              : 'text-muted-foreground'
-                          )}
-                        >
-                          {chunk.text}
-                        </span>
-                      )
-                    })}
-                  </div>
-                </ScrollArea>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-medium">Transcript</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={cn('h-6 gap-1 text-[10px]', showRawChunks && 'text-primary')}
+                    onClick={() => setShowRawChunks((v) => !v)}
+                  >
+                    <Bug className="w-3 h-3" />
+                    Raw Chunks
+                  </Button>
+                </div>
+
+                {showRawChunks ? (
+                  <ScrollArea className="h-32 rounded-md border border-border p-2">
+                    <table className="w-full text-[10px] font-mono">
+                      <thead>
+                        <tr className="text-muted-foreground border-b border-border">
+                          <th className="text-left pr-2 pb-1">#</th>
+                          <th className="text-left pr-2 pb-1">Text</th>
+                          <th className="text-left pr-2 pb-1">Start</th>
+                          <th className="text-left pb-1">End</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {wordChunks.map((chunk, idx) => {
+                          const markerMatch = markers.find((m) =>
+                            m.markerChunkIndices.includes(idx)
+                          )
+                          return (
+                            <tr
+                              key={idx}
+                              onClick={() => seekVideo(chunk.start)}
+                              className={cn(
+                                'cursor-pointer hover:bg-muted/50',
+                                markerMatch && cn(BUCKET_COLORS_BG_LIGHT[markerMatch.bucket], BUCKET_COLORS_TEXT[markerMatch.bucket])
+                              )}
+                            >
+                              <td className="pr-2 text-muted-foreground">{idx}</td>
+                              <td className="pr-2 font-semibold">{JSON.stringify(chunk.text)}</td>
+                              <td className="pr-2">{chunk.start.toFixed(2)}s</td>
+                              <td>{chunk.end.toFixed(2)}s</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </ScrollArea>
+                ) : (
+                  <ScrollArea className="h-20 rounded-md border border-border p-2">
+                    <div className="flex flex-wrap gap-0.5">
+                      {wordChunks.map((chunk, idx) => {
+                        const markerMatch = markers.find((m) =>
+                          m.markerChunkIndices.includes(idx)
+                        )
+                        return (
+                          <span
+                            key={idx}
+                            onClick={() => seekVideo(chunk.start)}
+                            className={cn(
+                              'text-xs cursor-pointer hover:underline rounded px-0.5',
+                              markerMatch
+                                ? cn('font-bold', BUCKET_COLORS_BG_LIGHT[markerMatch.bucket], BUCKET_COLORS_TEXT[markerMatch.bucket])
+                                : 'text-muted-foreground'
+                            )}
+                          >
+                            {chunk.text}
+                          </span>
+                        )
+                      })}
+                    </div>
+                  </ScrollArea>
+                )}
               </div>
             )}
 

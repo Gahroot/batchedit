@@ -15,20 +15,60 @@ export interface DetectedMarker {
   markerChunkIndices: number[]
 }
 
+/** Strip punctuation, lowercase, trim — so "Hook," → "hook", "CTA!" → "cta" */
+function normalize(word: string): string {
+  return word.toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
 const BUCKET_ALIASES: Record<string, BucketType> = {
   hook: 'hook',
   hooks: 'hook',
   meat: 'meat',
   meats: 'meat',
+  meet: 'meat',   // homophone — Whisper confuses these constantly
+  meets: 'meat',
   body: 'meat',
+  bodies: 'meat',
   middle: 'meat',
   cta: 'cta',
   ctas: 'cta',
-  'call-to-action': 'cta',
+  calltoaction: 'cta', // "call-to-action" after normalize strips hyphens
   closer: 'cta',
   close: 'cta',
-  outro: 'cta'
+  outro: 'cta',
+  outros: 'cta'
 }
+
+/**
+ * Multi-word sequences that resolve to a bucket type.
+ * Sorted longest-first so greedy matching picks the best pattern.
+ * All words are already normalized (lowercase, no punctuation).
+ */
+const MULTI_WORD_BUCKET: Array<{ words: string[]; bucket: BucketType }> = [
+  // "call to action"
+  { words: ['call', 'to', 'action'], bucket: 'cta' },
+
+  // CTA spelled out — exact letters
+  { words: ['c', 't', 'a'], bucket: 'cta' },
+
+  // CTA spelled out — phonetic variants Whisper-tiny produces
+  { words: ['see', 'tea', 'a'], bucket: 'cta' },
+  { words: ['see', 'tee', 'a'], bucket: 'cta' },
+  { words: ['see', 'tea', 'ay'], bucket: 'cta' },
+  { words: ['see', 'tee', 'ay'], bucket: 'cta' },
+  { words: ['sea', 'tea', 'a'], bucket: 'cta' },
+  { words: ['sea', 'tee', 'a'], bucket: 'cta' },
+  { words: ['sea', 'tea', 'ay'], bucket: 'cta' },
+  { words: ['sea', 'tee', 'ay'], bucket: 'cta' },
+  { words: ['si', 'ti', 'ay'], bucket: 'cta' },
+  { words: ['si', 'ti', 'a'], bucket: 'cta' },
+
+  // 2-word CTA splits Whisper sometimes produces
+  { words: ['ct', 'a'], bucket: 'cta' },
+  { words: ['c', 'ta'], bucket: 'cta' },
+  { words: ['see', 'ta'], bucket: 'cta' },
+  { words: ['sea', 'ta'], bucket: 'cta' }
+].sort((a, b) => b.words.length - a.words.length) // longest first
 
 const NUMBER_WORDS: Record<string, number> = {
   one: 1, two: 2, three: 3, four: 4, five: 5,
@@ -51,23 +91,73 @@ function editDistance(a: string, b: string): number {
   return dp[m][n]
 }
 
-function matchBucket(word: string): BucketType | null {
-  const lower = word.toLowerCase().trim()
-  if (BUCKET_ALIASES[lower]) return BUCKET_ALIASES[lower]
-  // Fuzzy: allow edit distance of 1 for bucket keywords
+function matchBucketSingle(normalized: string): BucketType | null {
+  if (!normalized) return null
+  if (BUCKET_ALIASES[normalized]) return BUCKET_ALIASES[normalized]
+  // Fuzzy: edit distance 1 for aliases with >= 3 chars
   for (const alias of Object.keys(BUCKET_ALIASES)) {
-    if (alias.length >= 3 && editDistance(lower, alias) <= 1) {
+    if (alias.length >= 3 && editDistance(normalized, alias) <= 1) {
       return BUCKET_ALIASES[alias]
     }
   }
   return null
 }
 
-function parseNumber(word: string): number | null {
-  const lower = word.toLowerCase().trim()
-  if (NUMBER_WORDS[lower] !== undefined) return NUMBER_WORDS[lower]
-  const num = parseInt(lower, 10)
+function parseNumber(normalized: string): number | null {
+  if (!normalized) return null
+  if (NUMBER_WORDS[normalized] !== undefined) return NUMBER_WORDS[normalized]
+  const num = parseInt(normalized, 10)
   if (!isNaN(num) && num >= 1 && num <= 99) return num
+  // Fuzzy: edit distance 1 for number words >= 3 chars
+  for (const word of Object.keys(NUMBER_WORDS)) {
+    if (word.length >= 3 && editDistance(normalized, word) <= 1) {
+      return NUMBER_WORDS[word]
+    }
+  }
+  return null
+}
+
+/**
+ * Try to split a single normalized token into bucket + number.
+ * Handles Whisper merging them: "cta2", "hook1", "meettwo", "bodyThree", etc.
+ */
+function matchFused(normalized: string): { bucket: BucketType; num: number } | null {
+  if (!normalized || normalized.length < 2) return null
+
+  // Collect all alias keys sorted longest-first so "calltoaction" matches before "call"
+  const aliases = Object.keys(BUCKET_ALIASES).sort((a, b) => b.length - a.length)
+
+  for (const alias of aliases) {
+    if (normalized.startsWith(alias) && normalized.length > alias.length) {
+      const remainder = normalized.slice(alias.length)
+      const num = parseNumber(remainder)
+      if (num !== null) {
+        return { bucket: BUCKET_ALIASES[alias], num }
+      }
+    }
+  }
+  return null
+}
+
+/** Try multi-word bucket patterns starting at index i. Returns match or null. */
+function matchBucketMulti(
+  normed: string[],
+  startIdx: number
+): { bucket: BucketType; wordsConsumed: number } | null {
+  for (const pattern of MULTI_WORD_BUCKET) {
+    const end = startIdx + pattern.words.length
+    if (end > normed.length) continue
+    let match = true
+    for (let j = 0; j < pattern.words.length; j++) {
+      if (normed[startIdx + j] !== pattern.words[j]) {
+        match = false
+        break
+      }
+    }
+    if (match) {
+      return { bucket: pattern.bucket, wordsConsumed: pattern.words.length }
+    }
+  }
   return null
 }
 
@@ -77,68 +167,107 @@ export function detectMarkers(wordChunks: WhisperChunk[], videoDuration: number)
   const markers: DetectedMarker[] = []
   const used = new Set<number>()
 
-  // Sliding window: try 3-word then 2-word windows
-  for (const windowSize of [3, 2]) {
-    for (let i = 0; i <= wordChunks.length - windowSize; i++) {
-      if (used.has(i)) continue
+  // Pre-normalize all chunk texts once
+  const normed = wordChunks.map((w) => normalize(w.text))
 
-      const words = wordChunks.slice(i, i + windowSize)
-      const texts = words.map((w) => w.text.toLowerCase().trim())
+  // Pass 0: fused single-token bucket+number (e.g. "cta2", "hook1", "meettwo")
+  for (let i = 0; i < wordChunks.length; i++) {
+    if (used.has(i)) continue
+    if (!normed[i]) continue
 
-      let bucket: BucketType | null = null
-      let num: number | null = null
-      let markerIndices: number[] = []
+    const fused = matchFused(normed[i])
+    if (!fused) continue
 
-      if (windowSize === 3) {
-        // Pattern: bucket word number (e.g., "hook one now")
-        // Try first two words as bucket + number
-        bucket = matchBucket(texts[0])
-        num = bucket ? parseNumber(texts[1]) : null
-        if (bucket && num !== null) {
-          markerIndices = [i, i + 1]
-        }
-      }
+    const bucketLabel = fused.bucket === 'cta'
+      ? 'CTA'
+      : fused.bucket.charAt(0).toUpperCase() + fused.bucket.slice(1)
 
-      if (windowSize === 2) {
-        bucket = matchBucket(texts[0])
-        num = bucket ? parseNumber(texts[1]) : null
-        if (bucket && num !== null) {
-          markerIndices = [i, i + 1]
-        }
-      }
-
-      if (bucket && num !== null && markerIndices.length > 0) {
-        const bucketLabel = bucket === 'cta' ? 'CTA' : bucket.charAt(0).toUpperCase() + bucket.slice(1)
-        markers.push({
-          id: `marker-${nextId++}`,
-          label: `${bucketLabel} ${num}`,
-          bucket,
-          startTime: 0, // Will be set below
-          endTime: 0,
-          markerChunkIndices: markerIndices
-        })
-        markerIndices.forEach((idx) => used.add(idx))
-      }
-    }
+    markers.push({
+      id: `marker-${nextId++}`,
+      label: `${bucketLabel} ${fused.num}`,
+      bucket: fused.bucket,
+      startTime: 0,
+      endTime: 0,
+      markerChunkIndices: [i]
+    })
+    used.add(i)
   }
 
-  // Sort markers by the timestamp of the marker phrase
+  // Pass 1: multi-word bucket patterns (CTA spelled out, "call to action", etc.)
+  for (let i = 0; i < wordChunks.length; i++) {
+    if (used.has(i)) continue
+    if (!normed[i]) continue
+
+    const multi = matchBucketMulti(normed, i)
+    if (!multi) continue
+
+    const numberIdx = i + multi.wordsConsumed
+    if (numberIdx >= wordChunks.length || used.has(numberIdx)) continue
+
+    const num = parseNumber(normed[numberIdx])
+    if (num === null) continue
+
+    const indices = Array.from({ length: multi.wordsConsumed + 1 }, (_, k) => i + k)
+    const bucketLabel = multi.bucket === 'cta'
+      ? 'CTA'
+      : multi.bucket.charAt(0).toUpperCase() + multi.bucket.slice(1)
+
+    markers.push({
+      id: `marker-${nextId++}`,
+      label: `${bucketLabel} ${num}`,
+      bucket: multi.bucket,
+      startTime: 0,
+      endTime: 0,
+      markerChunkIndices: indices
+    })
+    indices.forEach((idx) => used.add(idx))
+  }
+
+  // Pass 2: single-word bucket + number (e.g. "hook one", "body 2")
+  for (let i = 0; i < wordChunks.length - 1; i++) {
+    if (used.has(i)) continue
+    if (!normed[i]) continue
+
+    const bucket = matchBucketSingle(normed[i])
+    if (!bucket) continue
+
+    const numIdx = i + 1
+    if (used.has(numIdx)) continue
+
+    const num = parseNumber(normed[numIdx])
+    if (num === null) continue
+
+    const bucketLabel = bucket === 'cta'
+      ? 'CTA'
+      : bucket.charAt(0).toUpperCase() + bucket.slice(1)
+
+    markers.push({
+      id: `marker-${nextId++}`,
+      label: `${bucketLabel} ${num}`,
+      bucket,
+      startTime: 0,
+      endTime: 0,
+      markerChunkIndices: [i, numIdx]
+    })
+    used.add(i)
+    used.add(numIdx)
+  }
+
+  // Sort markers by their position in the audio
   markers.sort((a, b) => {
     const aTime = wordChunks[a.markerChunkIndices[0]].start
     const bTime = wordChunks[b.markerChunkIndices[0]].start
     return aTime - bTime
   })
 
-  // Set start/end times: content starts after marker phrase, ends at next marker
+  // Set start/end times: content starts after the marker phrase, ends at next marker
   for (let i = 0; i < markers.length; i++) {
     const lastMarkerIdx = markers[i].markerChunkIndices[markers[i].markerChunkIndices.length - 1]
-    // Content starts at the first word after the marker phrase
     const nextWordIdx = lastMarkerIdx + 1
     markers[i].startTime = nextWordIdx < wordChunks.length
       ? wordChunks[nextWordIdx].start
       : wordChunks[lastMarkerIdx].end
 
-    // Content ends at the start of the next marker (or video duration)
     if (i + 1 < markers.length) {
       const nextMarkerFirstIdx = markers[i + 1].markerChunkIndices[0]
       markers[i].endTime = wordChunks[nextMarkerFirstIdx].start
