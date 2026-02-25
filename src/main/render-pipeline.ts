@@ -328,7 +328,7 @@ export function generateWordHighlightAssFile(
   const fontSize = Math.round(height * 0.05)
   const isVertical916 = width * 16 <= height * 9
   // 9:16: just below center (40% up from bottom); others: near bottom (5%)
-  const marginV = isVertical916 ? Math.round(height * 0.40) : Math.round(height * 0.05)
+  const marginV = isVertical916 ? Math.round(height * 0.80) : Math.round(height * 0.05)
   const fontName = style?.fontName || 'Arial'
   const highlightBgr = style ? cssHexToAssBgr(style.highlightColor) : '&H0000FFFF'
 
@@ -340,7 +340,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Karaoke,${fontName},${fontSize},&H00FFFFFF,${highlightBgr},&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,10,10,${marginV},1
+Style: Karaoke,${fontName},${fontSize},${highlightBgr},&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,10,10,${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
