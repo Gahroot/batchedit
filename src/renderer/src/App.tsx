@@ -5,6 +5,7 @@ import { RenderPanel } from './components/RenderPanel'
 import { SettingsBar } from './components/SettingsBar'
 import { Film } from 'lucide-react'
 import { ClipSplitter } from './components/ClipSplitter'
+import { TemplateEditor } from './components/TemplateEditor'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 
@@ -20,6 +21,7 @@ function App() {
           <h1 className="text-lg font-semibold">BatchEdit</h1>
         </div>
         <div className="flex items-center gap-4">
+          <TemplateEditor />
           <ClipSplitter />
           {totalCombos > 0 && (
             <motion.div

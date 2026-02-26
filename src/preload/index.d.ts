@@ -24,6 +24,10 @@ interface RenderJob {
   captionsAssPath?: string
   autoResize?: boolean
   resolution: { width: number; height: number }
+  titlePosition?: { x: number; y: number }
+  mediaOverlays?: { meat?: string; cta?: string }
+  mediaOverlayPosition?: { x: number; y: number }
+  meatDurationSec?: number
 }
 
 interface RenderProgress {
@@ -35,11 +39,22 @@ interface RenderProgress {
 
 interface CaptionStyleOptions {
   fontName: string
+  fontFile: string
+  fontSize: number
+  primaryColor: string
   highlightColor: string
+  outlineColor: string
+  backColor: string
+  outline: number
+  shadow: number
+  borderStyle: number
+  wordsPerLine: number
+  animation: 'karaoke-fill' | 'word-pop' | 'fade-in' | 'glow'
 }
 
 interface Api {
   openFiles: () => Promise<string[]>
+  openImages: () => Promise<string[]>
   openDirectory: () => Promise<string | null>
   getMetadata: (filePath: string) => Promise<VideoMetadata>
   extractAudio: (videoPath: string) => Promise<string>
@@ -54,15 +69,19 @@ interface Api {
     segments: Array<{
       wordChunks: Array<{ text: string; start: number; end: number }>
       offsetMs: number
+      durationMs?: number
     }>
     resolution: { width: number; height: number }
     captionStyle?: CaptionStyleOptions
+    captionPosition?: { x: number; y: number }
   }) => Promise<string>
   splitVideo(
     videoPath: string,
     segments: Array<{ label: string; bucket: string; startTime: number; endTime: number }>,
     outputDir: string | null
   ): Promise<Array<{ label: string; bucket: string; outputPath: string }>>
+  detectLeadingSilence: (videoPath: string) => Promise<number>
+  trimLeadingSilence: (videoPath: string, outputDir?: string) => Promise<{ outputPath: string; trimmedSeconds: number }>
   generateHookText: (apiKey: string, transcript: string) => Promise<string>
   renderBatch: (jobs: RenderJob[]) => Promise<RenderProgress[]>
   onRenderProgress: (callback: (progress: RenderProgress[]) => void) => () => void

@@ -75,6 +75,17 @@ app.whenReady().then(() => {
     return result.filePaths
   })
 
+  // IPC: Open file dialog for image selection
+  ipcMain.handle('dialog:openImages', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [
+        { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }
+      ]
+    })
+    return result.filePaths
+  })
+
   // IPC: Open directory dialog for output
   ipcMain.handle('dialog:openDirectory', async () => {
     const result = await dialog.showOpenDialog({

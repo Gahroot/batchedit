@@ -45,20 +45,72 @@ export interface ErrorLogEntry {
   message: string
 }
 
+export type CaptionAnimation = 'karaoke-fill' | 'word-pop' | 'fade-in' | 'glow'
+
 export interface CaptionStyle {
   id: string
   label: string
   fontName: string
   fontFile: string
+  fontSize: number
+  primaryColor: string
   highlightColor: string
+  outlineColor: string
+  backColor: string
+  outline: number
+  shadow: number
+  borderStyle: number
+  wordsPerLine: number
+  animation: CaptionAnimation
+}
+
+export interface TemplateLayout {
+  titleText: { x: number; y: number }
+  subtitles: { x: number; y: number }
+  media: { x: number; y: number }
 }
 
 export const CAPTION_PRESETS: Record<string, CaptionStyle> = {
-  montserrat: { id: 'montserrat', label: 'Montserrat', fontName: 'Montserrat', fontFile: 'Montserrat-Bold.ttf', highlightColor: '#FFFF00' },
-  poppins:    { id: 'poppins',    label: 'Poppins',    fontName: 'Poppins',    fontFile: 'Poppins-Bold.ttf',    highlightColor: '#FFFF00' },
-  roboto:     { id: 'roboto',     label: 'Roboto',     fontName: 'Roboto',     fontFile: 'Roboto-Bold.ttf',     highlightColor: '#FFFF00' },
-  opensans:   { id: 'opensans',   label: 'Open Sans',  fontName: 'Open Sans',  fontFile: 'OpenSans-Bold.ttf',   highlightColor: '#FFFF00' },
-  inter:      { id: 'inter',      label: 'Inter',      fontName: 'Inter',      fontFile: 'Inter-Bold.ttf',      highlightColor: '#FFFF00' },
+  'hormozi-bold': {
+    id: 'hormozi-bold', label: 'Hormozi Bold', fontName: 'Montserrat', fontFile: 'Montserrat-Bold.ttf',
+    fontSize: 0.07, primaryColor: '#FFFFFF', highlightColor: '#00FF00', outlineColor: '#000000',
+    backColor: '#80000000', outline: 4, shadow: 2, borderStyle: 1, wordsPerLine: 2, animation: 'word-pop'
+  },
+  'tiktok-glow': {
+    id: 'tiktok-glow', label: 'TikTok Glow', fontName: 'Poppins', fontFile: 'Poppins-Bold.ttf',
+    fontSize: 0.06, primaryColor: '#FFFFFF', highlightColor: '#00FFFF', outlineColor: '#FF00FF',
+    backColor: '#00000000', outline: 2, shadow: 0, borderStyle: 1, wordsPerLine: 3, animation: 'glow'
+  },
+  'reels-clean': {
+    id: 'reels-clean', label: 'Reels Clean', fontName: 'Inter', fontFile: 'Inter-Bold.ttf',
+    fontSize: 0.04, primaryColor: '#FFFFFF', highlightColor: '#FFFFFF', outlineColor: '#000000',
+    backColor: '#C8191919', outline: 0, shadow: 0, borderStyle: 3, wordsPerLine: 6, animation: 'fade-in'
+  },
+  'classic-karaoke': {
+    id: 'classic-karaoke', label: 'Classic Karaoke', fontName: 'Inter', fontFile: 'Inter-Bold.ttf',
+    fontSize: 0.05, primaryColor: '#FFFFFF', highlightColor: '#FFFF00', outlineColor: '#000000',
+    backColor: '#80000000', outline: 3, shadow: 1, borderStyle: 1, wordsPerLine: 4, animation: 'karaoke-fill'
+  },
+  'bold-clean': {
+    id: 'bold-clean', label: 'Bold Clean', fontName: 'Inter', fontFile: 'Inter-Bold.ttf',
+    fontSize: 0.055, primaryColor: '#FFFFFF', highlightColor: '#FFFFFF', outlineColor: '#000000',
+    backColor: '#00000000', outline: 0, shadow: 4, borderStyle: 1, wordsPerLine: 2, animation: 'word-pop'
+  },
+  'soft-highlight': {
+    id: 'soft-highlight', label: 'Soft Highlight', fontName: 'Open Sans', fontFile: 'OpenSans-Bold.ttf',
+    fontSize: 0.05, primaryColor: '#FFFFFF', highlightColor: '#C4B5FD', outlineColor: '#000000',
+    backColor: '#80000000', outline: 2, shadow: 0, borderStyle: 1, wordsPerLine: 4, animation: 'karaoke-fill'
+  },
+  'streaming-sub': {
+    id: 'streaming-sub', label: 'Streaming Sub', fontName: 'Roboto', fontFile: 'Roboto-Bold.ttf',
+    fontSize: 0.035, primaryColor: '#FFFFFF', highlightColor: '#FFFFFF', outlineColor: '#000000',
+    backColor: '#E0000000', outline: 0, shadow: 0, borderStyle: 3, wordsPerLine: 7, animation: 'fade-in'
+  },
+  'minimal-fade': {
+    id: 'minimal-fade', label: 'Minimal Fade', fontName: 'Inter', fontFile: 'Inter-Bold.ttf',
+    fontSize: 0.045, primaryColor: '#FFFFFF', highlightColor: '#FFFFFF', outlineColor: '#000000',
+    backColor: '#00000000', outline: 0, shadow: 2, borderStyle: 1, wordsPerLine: 5, animation: 'fade-in'
+  },
 }
 
 interface AppState {
@@ -84,13 +136,24 @@ interface AppState {
   // Caption style
   captionStyle: CaptionStyle
   setCaptionStyle: (style: CaptionStyle) => void
-  setHighlightColor: (color: string) => void
 
   // Gemini AI
   geminiApiKey: string
   setGeminiApiKey: (key: string) => void
   hookTextProgress: HookTextProgress | null
   setHookTextProgress: (progress: HookTextProgress | null) => void
+
+  // Template layout
+  templateLayout: TemplateLayout
+  setTemplateLayout: (layout: TemplateLayout) => void
+
+  // Media overlays (proof images for meat/CTA segments)
+  mediaOverlays: { meat: string | null; cta: string | null }
+  setMediaOverlay: (bucket: 'meat' | 'cta', path: string | null) => void
+
+  // Auto trim silence
+  autoTrimSilence: boolean
+  setAutoTrimSilence: (enabled: boolean) => void
 
   // Error log
   errorLog: ErrorLogEntry[]
@@ -131,24 +194,35 @@ export const useStore = create<AppState>((set, get) => ({
   renderProgress: [],
   isRendering: false,
   captionProgress: null,
-  captionStyle: CAPTION_PRESETS.montserrat,
+  captionStyle: CAPTION_PRESETS['hormozi-bold'],
   geminiApiKey: localStorage.getItem('batchedit-gemini-key') || '',
   hookTextProgress: null,
+  templateLayout: {
+    titleText: { x: 50, y: 12 },
+    subtitles: { x: 50, y: 65 },
+    media: { x: 50, y: 75 }
+  },
+  mediaOverlays: { meat: null, cta: null },
+  autoTrimSilence: false,
+  setAutoTrimSilence: (enabled) => set({ autoTrimSilence: enabled }),
+
   errorLog: [],
+
+  setMediaOverlay: (bucket, path) =>
+    set((state) => ({
+      mediaOverlays: { ...state.mediaOverlays, [bucket]: path }
+    })),
 
   setCaptionProgress: (progress) => set({ captionProgress: progress }),
 
   setCaptionStyle: (style) => set({ captionStyle: style }),
-  setHighlightColor: (color) =>
-    set((state) => ({
-      captionStyle: { ...state.captionStyle, highlightColor: color }
-    })),
 
   setGeminiApiKey: (key) => {
     localStorage.setItem('batchedit-gemini-key', key)
     set({ geminiApiKey: key })
   },
   setHookTextProgress: (progress) => set({ hookTextProgress: progress }),
+  setTemplateLayout: (layout) => set({ templateLayout: layout }),
 
   addError: (entry) =>
     set((state) => ({
@@ -209,6 +283,7 @@ export const useStore = create<AppState>((set, get) => ({
       meats: [],
       ctas: [],
       hookTexts: {},
+      mediaOverlays: { meat: null, cta: null },
       renderProgress: [],
       isRendering: false,
       errorLog: []

@@ -121,14 +121,14 @@ describe('generateAssFile', () => {
     expect(result2).toContain(`Arial,${Math.round(1920 * 0.04)},`)
   })
 
-  it('uses MarginV of ~5% of resolution height', () => {
-    // 1080 * 0.05 = 54
+  it('uses correct MarginV for resolution', () => {
+    // Landscape: height * 0.03 = 32
     const result = generateAssFile([], { width: 1920, height: 1080 })
-    expect(result).toContain(`,${Math.round(1080 * 0.05)},1`)
+    expect(result).toContain(`,${Math.round(1080 * 0.03)},1`)
 
-    // 1920 * 0.05 = 96
+    // 9:16 vertical: height * 0.08 = 154
     const result2 = generateAssFile([], { width: 1080, height: 1920 })
-    expect(result2).toContain(`,${Math.round(1920 * 0.05)},1`)
+    expect(result2).toContain(`,${Math.round(1920 * 0.08)},1`)
   })
 
   it('includes both Default and Highlight styles', () => {
@@ -212,15 +212,15 @@ describe('generateWordHighlightAssFile', () => {
     expect(result).toContain('0:00:01.00,0:00:02.00')
   })
 
-  it('uses font size of 5% of resolution height', () => {
-    // 1920 * 0.05 = 96
+  it('uses default font size of 5% of resolution height', () => {
+    // Default style is Classic Karaoke: Inter at 5% -> 1920 * 0.05 = 96
     const result = generateWordHighlightAssFile([], resolution)
-    expect(result).toContain(`Arial,${Math.round(1920 * 0.05)},`)
+    expect(result).toContain(`Inter,${Math.round(1920 * 0.05)},`)
   })
 
-  it('uses MarginV of 5% of resolution height', () => {
+  it('uses MarginV of 35% of resolution height for 9:16', () => {
     const result = generateWordHighlightAssFile([], resolution)
-    expect(result).toContain(`,${Math.round(1920 * 0.05)},1`)
+    expect(result).toContain(`,${Math.round(1920 * 0.35)},1`)
   })
 
   it('produces valid ASS with no Dialogue for empty chunks', () => {
@@ -284,9 +284,8 @@ describe('generateCombinedAssFile', () => {
     expect(dialogueLines[0]).toContain('0:00:00.00,0:00:01.00')
   })
 
-  it('applies cumulative offsets to multiple segments', () => {
-    // generateCombinedAssFile flattens all chunks then groups by 4 words.
-    // 2 total words = 1 dialogue line spanning from first word start to last word end.
+  it('applies cumulative offsets to multiple segments independently', () => {
+    // Each segment's words are grouped independently — no cross-clip bleed.
     const segments = [
       {
         wordChunks: [{ text: 'first', start: 0, end: 1.0 }],
@@ -300,13 +299,15 @@ describe('generateCombinedAssFile', () => {
     const result = generateCombinedAssFile(segments, resolution)
     const dialogueLines = result.split('\n').filter((l) => l.startsWith('Dialogue:'))
 
-    // Both words fit in a single 4-word group
-    expect(dialogueLines).toHaveLength(1)
-    // Line spans from first word (0s) to second word (5+1=6s)
-    expect(dialogueLines[0]).toContain('0:00:00.00,0:00:06.00')
-    // Both words present with karaoke tags
+    // Each segment produces its own dialogue line
+    expect(dialogueLines).toHaveLength(2)
+    // First line: word "first" at 0-1s
+    expect(dialogueLines[0]).toContain('0:00:00.00,0:00:01.00')
     expect(dialogueLines[0]).toContain('first')
-    expect(dialogueLines[0]).toContain('second')
+    expect(dialogueLines[0]).not.toContain('second')
+    // Second line: word "second" at 5-6s
+    expect(dialogueLines[1]).toContain('0:00:05.00,0:00:06.00')
+    expect(dialogueLines[1]).toContain('second')
   })
 
   it('correctly offsets word timestamps for karaoke durations', () => {
@@ -329,7 +330,7 @@ describe('generateCombinedAssFile', () => {
     expect(result).toContain('{\\kf50}word2')
   })
 
-  it('combines chunks from multiple segments into 4-word groupings', () => {
+  it('groups words per-segment without cross-clip mixing', () => {
     const segments = [
       {
         wordChunks: [
@@ -350,14 +351,16 @@ describe('generateCombinedAssFile', () => {
     const result = generateCombinedAssFile(segments, resolution)
     const dialogueLines = result.split('\n').filter((l) => l.startsWith('Dialogue:'))
 
-    // 5 words total -> 1 line of 4 + 1 line of 1
+    // Segment 1: 3 words -> 1 line (< wordsPerLine=4)
+    // Segment 2: 2 words -> 1 line
     expect(dialogueLines).toHaveLength(2)
-    // First line contains a, b, c, d
+    // First line contains a, b, c only (from segment 1)
     expect(dialogueLines[0]).toContain('}a')
     expect(dialogueLines[0]).toContain('}b')
     expect(dialogueLines[0]).toContain('}c')
-    expect(dialogueLines[0]).toContain('}d')
-    // Second line contains e
+    expect(dialogueLines[0]).not.toContain('}d')
+    // Second line contains d, e only (from segment 2)
+    expect(dialogueLines[1]).toContain('}d')
     expect(dialogueLines[1]).toContain('}e')
   })
 
@@ -374,5 +377,128 @@ describe('generateCombinedAssFile', () => {
 
     expect(dialogueLines).toHaveLength(1)
     expect(dialogueLines[0]).toContain('hello')
+  })
+
+  it('clamps word timestamps to segment boundary when durationMs provided', () => {
+    const segments = [
+      {
+        wordChunks: [
+          { text: 'inside', start: 0, end: 0.5 },
+          // Whisper returns a word whose end exceeds the clip duration
+          { text: 'bleeds', start: 0.5, end: 1.5 }
+        ],
+        offsetMs: 0,
+        durationMs: 1000 // clip is only 1 second long
+      }
+    ]
+    const result = generateCombinedAssFile(segments, resolution)
+    const dialogueLines = result.split('\n').filter((l) => l.startsWith('Dialogue:'))
+
+    expect(dialogueLines).toHaveLength(1)
+    expect(dialogueLines[0]).toContain('inside')
+    expect(dialogueLines[0]).toContain('bleeds')
+    // End time should be clamped to 1.0s (1000ms)
+    expect(dialogueLines[0]).toContain('0:00:00.00,0:00:01.00')
+  })
+
+  it('filters out words that start at or after segment end', () => {
+    const segments = [
+      {
+        wordChunks: [
+          { text: 'good', start: 0, end: 0.5 },
+          // This word starts at the segment boundary — should be excluded
+          { text: 'bad', start: 1.0, end: 1.5 }
+        ],
+        offsetMs: 0,
+        durationMs: 1000
+      }
+    ]
+    const result = generateCombinedAssFile(segments, resolution)
+    const dialogueLines = result.split('\n').filter((l) => l.startsWith('Dialogue:'))
+
+    expect(dialogueLines).toHaveLength(1)
+    expect(dialogueLines[0]).toContain('good')
+    expect(dialogueLines[0]).not.toContain('bad')
+  })
+
+  it('isolates clip boundaries in a realistic 3-segment scenario', () => {
+    const segments = [
+      {
+        // Hook: "This is Hook One" (4 words = 1 full line)
+        wordChunks: [
+          { text: 'This', start: 0, end: 0.3 },
+          { text: 'is', start: 0.3, end: 0.5 },
+          { text: 'Hook', start: 0.5, end: 0.8 },
+          { text: 'One', start: 0.8, end: 1.0 }
+        ],
+        offsetMs: 0,
+        durationMs: 1200
+      },
+      {
+        // Meat: "This is the Meat Clip" (5 words = 1 line of 4 + 1 line of 1)
+        wordChunks: [
+          { text: 'This', start: 0, end: 0.3 },
+          { text: 'is', start: 0.3, end: 0.5 },
+          { text: 'the', start: 0.5, end: 0.7 },
+          { text: 'Meat', start: 0.7, end: 1.0 },
+          { text: 'Clip', start: 1.0, end: 1.3 }
+        ],
+        offsetMs: 1200,
+        durationMs: 1500
+      },
+      {
+        // CTA: "Buy Now" (2 words = 1 line)
+        wordChunks: [
+          { text: 'Buy', start: 0, end: 0.5 },
+          { text: 'Now', start: 0.5, end: 1.0 }
+        ],
+        offsetMs: 2700,
+        durationMs: 1000
+      }
+    ]
+    const result = generateCombinedAssFile(segments, resolution)
+    const dialogueLines = result.split('\n').filter((l) => l.startsWith('Dialogue:'))
+
+    // Hook: 4 words -> 1 line
+    // Meat: 5 words -> 2 lines (4+1)
+    // CTA: 2 words -> 1 line
+    expect(dialogueLines).toHaveLength(4)
+
+    // Hook line should NOT contain any meat words
+    expect(dialogueLines[0]).toContain('}This')
+    expect(dialogueLines[0]).toContain('}One')
+    expect(dialogueLines[0]).not.toContain('}Meat')
+
+    // First meat line: "This is the Meat"
+    expect(dialogueLines[1]).toContain('}Meat')
+    expect(dialogueLines[1]).not.toContain('}Buy')
+
+    // Second meat line: "Clip"
+    expect(dialogueLines[2]).toContain('}Clip')
+
+    // CTA line
+    expect(dialogueLines[3]).toContain('}Buy')
+    expect(dialogueLines[3]).toContain('}Now')
+  })
+
+  it('works without durationMs (backwards compatible)', () => {
+    // When durationMs is not provided, no clamping or filtering happens
+    const segments = [
+      {
+        wordChunks: [{ text: 'hello', start: 0, end: 0.5 }],
+        offsetMs: 0
+      },
+      {
+        wordChunks: [{ text: 'world', start: 0, end: 0.5 }],
+        offsetMs: 1000
+      }
+    ]
+    const result = generateCombinedAssFile(segments, resolution)
+    const dialogueLines = result.split('\n').filter((l) => l.startsWith('Dialogue:'))
+
+    // Still groups per-segment even without durationMs
+    expect(dialogueLines).toHaveLength(2)
+    expect(dialogueLines[0]).toContain('hello')
+    expect(dialogueLines[1]).toContain('world')
   })
 })

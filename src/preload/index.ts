@@ -4,6 +4,7 @@ import { electronAPI } from '@electron-toolkit/preload'
 const api = {
   // File dialogs
   openFiles: () => ipcRenderer.invoke('dialog:openFiles'),
+  openImages: () => ipcRenderer.invoke('dialog:openImages'),
   openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
 
   // FFmpeg
@@ -17,9 +18,16 @@ const api = {
     segments: {
       wordChunks: { text: string; start: number; end: number }[]
       offsetMs: number
+      durationMs?: number
     }[]
     resolution: { width: number; height: number }
-    captionStyle?: { fontName: string; highlightColor: string }
+    captionStyle?: {
+      fontName: string; fontFile: string; fontSize: number
+      primaryColor: string; highlightColor: string; outlineColor: string; backColor: string
+      outline: number; shadow: number; borderStyle: number; wordsPerLine: number
+      animation: 'karaoke-fill' | 'word-pop' | 'fade-in' | 'glow'
+    }
+    captionPosition?: { x: number; y: number }
   }) => ipcRenderer.invoke('ffmpeg:generateCombinedAss', data),
 
   getThumbnail: (videoPath: string) => ipcRenderer.invoke('ffmpeg:thumbnail', videoPath),
@@ -31,6 +39,12 @@ const api = {
     segments: Array<{ label: string; bucket: string; startTime: number; endTime: number }>,
     outputDir: string | null
   ) => ipcRenderer.invoke('ffmpeg:splitVideo', videoPath, segments, outputDir),
+
+  // Silence trimming
+  detectLeadingSilence: (videoPath: string) =>
+    ipcRenderer.invoke('ffmpeg:detectLeadingSilence', videoPath),
+  trimLeadingSilence: (videoPath: string, outputDir?: string) =>
+    ipcRenderer.invoke('ffmpeg:trimLeadingSilence', videoPath, outputDir),
 
   // AI
   generateHookText: (apiKey: string, transcript: string) =>

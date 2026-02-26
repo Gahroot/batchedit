@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, Loader2, CheckCircle, AlertCircle, Captions, Crop } from 'lucide-react'
-import { useStore, RenderProgress, CAPTION_PRESETS } from '../store'
+import { Play, Loader2, CheckCircle, AlertCircle, Captions, Crop, Scissors } from 'lucide-react'
+import { useStore, RenderProgress } from '../store'
 import { useWhisper } from '@/hooks/useWhisper'
 import { WhisperStatus } from './WhisperStatus'
 import { ErrorLog } from './ErrorLog'
+import { CaptionStylePicker } from './CaptionStylePicker'
 import { cn } from '../lib/utils'
 import { v4 as uuidv4 } from 'uuid'
 import { Button } from '@/components/ui/button'
@@ -36,8 +37,10 @@ export function RenderPanel() {
   const addError = useStore((s) => s.addError)
   const clearErrors = useStore((s) => s.clearErrors)
   const captionStyle = useStore((s) => s.captionStyle)
-  const setCaptionStyle = useStore((s) => s.setCaptionStyle)
-  const setHighlightColor = useStore((s) => s.setHighlightColor)
+  const templateLayout = useStore((s) => s.templateLayout)
+  const mediaOverlays = useStore((s) => s.mediaOverlays)
+  const autoTrimSilence = useStore((s) => s.autoTrimSilence)
+  const setAutoTrimSilence = useStore((s) => s.setAutoTrimSilence)
 
   const { loadModel, transcribe, isModelLoading, isModelReady, isTranscribing, loadProgress } =
     useWhisper()
@@ -166,7 +169,8 @@ export function RenderPanel() {
           ctaPath: combo.cta.path,
           outputPath: `${settings.outputDirectory}/${outputName}`,
           resolution: { width: settings.resolution.width, height: settings.resolution.height },
-          autoResize
+          autoResize,
+          titlePosition: templateLayout.titleText
         }
 
         // Add text overlay if defined
@@ -175,28 +179,44 @@ export function RenderPanel() {
           job.hookDurationSec = combo.hook.duration
         }
 
+        // Add media overlays if set
+        if (mediaOverlays.meat || mediaOverlays.cta) {
+          job.mediaOverlays = {
+            meat: mediaOverlays.meat || undefined,
+            cta: mediaOverlays.cta || undefined
+          }
+          job.mediaOverlayPosition = templateLayout.media
+          job.meatDurationSec = combo.meat.duration
+          // Ensure hookDurationSec is set for overlay timing
+          if (!job.hookDurationSec) {
+            job.hookDurationSec = combo.hook.duration
+          }
+        }
+
         // Add captions if available
         if (autoCaptions && Object.keys(transcriptionCache).length > 0) {
           try {
             const hookDurationMs = combo.hook.duration * 1000
             const meatDurationMs = combo.meat.duration * 1000
 
+            const ctaDurationMs = combo.cta.duration * 1000
+
             const segments = [
-              { wordChunks: transcriptionCache[combo.hook.path] || [], offsetMs: 0 },
-              { wordChunks: transcriptionCache[combo.meat.path] || [], offsetMs: hookDurationMs },
+              { wordChunks: transcriptionCache[combo.hook.path] || [], offsetMs: 0, durationMs: hookDurationMs },
+              { wordChunks: transcriptionCache[combo.meat.path] || [], offsetMs: hookDurationMs, durationMs: meatDurationMs },
               {
                 wordChunks: transcriptionCache[combo.cta.path] || [],
-                offsetMs: hookDurationMs + meatDurationMs
+                offsetMs: hookDurationMs + meatDurationMs,
+                durationMs: ctaDurationMs
               }
             ]
 
+            const { id: _id, label: _label, ...styleProps } = captionStyle
             const assPath = await window.api.generateCombinedAss({
               segments,
               resolution: job.resolution,
-              captionStyle: {
-                fontName: captionStyle.fontName,
-                highlightColor: captionStyle.highlightColor
-              }
+              captionStyle: styleProps,
+              captionPosition: templateLayout.subtitles
             })
             job.captionsAssPath = assPath
           } catch (err) {
@@ -369,46 +389,22 @@ export function RenderPanel() {
             <span className="text-muted-foreground">Auto Captions</span>
           </label>
 
-          {/* Caption Style Controls (visible when auto captions enabled) */}
+          {/* Caption Style Picker (visible when auto captions enabled) */}
           {autoCaptions && (
-            <>
-              {/* Font Selector */}
-              <Select
-                value={captionStyle.id}
-                onValueChange={(value) => {
-                  const preset = CAPTION_PRESETS[value]
-                  if (preset) setCaptionStyle({ ...preset, highlightColor: captionStyle.highlightColor })
-                }}
-                disabled={isRendering}
-              >
-                <SelectTrigger className="h-7 w-auto text-xs gap-1 px-2">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {Object.values(CAPTION_PRESETS).map((preset) => (
-                    <SelectItem key={preset.id} value={preset.id}>
-                      {preset.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-
-              {/* Highlight Color Picker */}
-              <label className="relative cursor-pointer" title="Highlight color">
-                <div
-                  className="w-6 h-6 rounded border border-border"
-                  style={{ backgroundColor: captionStyle.highlightColor }}
-                />
-                <input
-                  type="color"
-                  value={captionStyle.highlightColor}
-                  onChange={(e) => setHighlightColor(e.target.value)}
-                  disabled={isRendering}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                />
-              </label>
-            </>
+            <CaptionStylePicker disabled={isRendering} />
           )}
+
+          {/* Trim Silence Toggle */}
+          <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+            <Switch
+              checked={autoTrimSilence}
+              onCheckedChange={setAutoTrimSilence}
+              disabled={isRendering}
+              className="scale-75"
+            />
+            <Scissors className="w-3.5 h-3.5 text-muted-foreground" />
+            <span className="text-muted-foreground">Trim Silence</span>
+          </label>
 
           {/* Auto Resize Toggle */}
           <label className="flex items-center gap-1.5 text-xs cursor-pointer">

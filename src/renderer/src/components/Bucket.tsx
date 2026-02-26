@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, X, Type, FileVideo, Sparkles, Loader2 } from 'lucide-react'
+import { Plus, X, Type, FileVideo, Sparkles, Loader2, Image } from 'lucide-react'
 import { useStore, BucketType, Clip } from '../store'
 import { useWhisper } from '../hooks/useWhisper'
 import { cn } from '../lib/utils'
@@ -126,25 +126,49 @@ export function Bucket({ type, label, color }: BucketProps) {
   const setHookText = useStore((s) => s.setHookText)
   const isRendering = useStore((s) => s.isRendering)
   const hookTextProgress = useStore((s) => s.hookTextProgress)
+  const mediaOverlays = useStore((s) => s.mediaOverlays)
+  const setMediaOverlay = useStore((s) => s.setMediaOverlay)
+  const autoTrimSilence = useStore((s) => s.autoTrimSilence)
   const [isDragOver, setIsDragOver] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
+
+  const processClip = useCallback(async (path: string): Promise<Clip> => {
+    let finalPath = path
+    if (autoTrimSilence) {
+      try {
+        const result = await window.api.trimLeadingSilence(path)
+        finalPath = result.outputPath
+      } catch {
+        // Fall back to untrimmed
+      }
+    }
+    const name = finalPath.split(/[/\\]/).pop() || path.split(/[/\\]/).pop() || 'Unknown'
+    const [meta, thumbnail] = await Promise.all([
+      window.api.getMetadata(finalPath).catch(() => ({ duration: 0 })),
+      window.api.getThumbnail(finalPath).catch(() => undefined)
+    ])
+    return { id: uuidv4(), path: finalPath, name, duration: meta.duration, thumbnail }
+  }, [autoTrimSilence])
 
   const handleAddClips = useCallback(async () => {
     const filePaths = await window.api.openFiles()
     if (!filePaths || filePaths.length === 0) return
 
-    const newClips: Clip[] = await Promise.all(
-      filePaths.map(async (path) => {
-        const name = path.split(/[/\\]/).pop() || 'Unknown'
-        const [meta, thumbnail] = await Promise.all([
-          window.api.getMetadata(path).catch(() => ({ duration: 0 })),
-          window.api.getThumbnail(path).catch(() => undefined)
-        ])
-        return { id: uuidv4(), path, name, duration: meta.duration, thumbnail }
-      })
-    )
+    setIsProcessing(true)
+    try {
+      const newClips = await Promise.all(filePaths.map(processClip))
+      addClips(type, newClips)
+    } finally {
+      setIsProcessing(false)
+    }
+  }, [type, addClips, processClip])
 
-    addClips(type, newClips)
-  }, [type, addClips])
+  const handlePickOverlay = useCallback(async () => {
+    if (type === 'hook') return
+    const filePaths = await window.api.openImages()
+    if (!filePaths || filePaths.length === 0) return
+    setMediaOverlay(type as 'meat' | 'cta', filePaths[0])
+  }, [type, setMediaOverlay])
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
@@ -168,19 +192,23 @@ export function Bucket({ type, label, color }: BucketProps) {
           .filter((f) => VIDEO_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext)))
           .map((f) => window.api.getPathForFile(f))
         if (videoPaths.length === 0) return
-        const newClips = await Promise.all(
-          videoPaths.map(async (path) => {
-            const name = path.split(/[/\\]/).pop() || 'Unknown'
-            const [meta, thumbnail] = await Promise.all([
-              window.api.getMetadata(path).catch(() => ({ duration: 0 })),
-              window.api.getThumbnail(path).catch(() => undefined)
-            ])
-            return { id: uuidv4(), path, name, duration: meta.duration, thumbnail }
-          })
-        )
-        addClips(type, newClips)
+        setIsProcessing(true)
+        try {
+          const newClips = await Promise.all(videoPaths.map(processClip))
+          addClips(type, newClips)
+        } finally {
+          setIsProcessing(false)
+        }
       }}
     >
+      {/* Processing spinner overlay */}
+      {isProcessing && (
+        <div className="flex items-center gap-2 px-4 py-1.5 border-b border-border bg-primary/5 text-xs text-muted-foreground">
+          <Loader2 className="w-3 h-3 animate-spin text-primary" />
+          <span>Trimming silence…</span>
+        </div>
+      )}
+
       {/* Bucket Header */}
       <CardHeader className="flex flex-row items-center justify-between space-y-0 px-4 py-3 border-b border-border">
         <div className="flex items-center gap-2">
@@ -190,6 +218,25 @@ export function Bucket({ type, label, color }: BucketProps) {
         </div>
         <div className="flex items-center gap-1.5">
           {type === 'hook' && <GenerateHookTextButton clips={clips} />}
+          {type !== 'hook' && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handlePickOverlay}
+                    disabled={isRendering}
+                    className="h-7 text-xs gap-1"
+                  >
+                    <Image className="w-3 h-3" />
+                    {mediaOverlays[type as 'meat' | 'cta'] ? 'Replace' : 'Image'}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Overlay a proof image on this segment</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
           <Button
             variant="secondary"
             size="sm"
@@ -202,6 +249,29 @@ export function Bucket({ type, label, color }: BucketProps) {
           </Button>
         </div>
       </CardHeader>
+
+      {/* Media overlay thumbnail */}
+      {type !== 'hook' && mediaOverlays[type as 'meat' | 'cta'] && (
+        <div className="flex items-center gap-2 px-4 py-1.5 border-b border-border bg-secondary/30">
+          <img
+            src={`file://${mediaOverlays[type as 'meat' | 'cta']}`}
+            alt="overlay"
+            className="w-8 h-8 rounded object-cover shrink-0"
+          />
+          <span className="text-xs text-muted-foreground truncate flex-1">
+            {mediaOverlays[type as 'meat' | 'cta']!.split(/[/\\]/).pop()}
+          </span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 shrink-0"
+            onClick={() => setMediaOverlay(type as 'meat' | 'cta', null)}
+            disabled={isRendering}
+          >
+            <X className="w-3.5 h-3.5" />
+          </Button>
+        </div>
+      )}
 
       {/* Hook text generation progress */}
       {type === 'hook' && hookTextProgress && (

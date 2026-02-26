@@ -1,5 +1,5 @@
 import { ipcMain, app } from 'electron'
-import { ffmpeg, getVideoMetadata, extractAudio, trimVideo } from './ffmpeg'
+import { ffmpeg, getVideoMetadata, extractAudio, trimVideo, detectLeadingSilence, trimLeadingSilence } from './ffmpeg'
 import { join, normalize } from 'path'
 import { writeFileSync, mkdirSync, unlinkSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -33,6 +33,60 @@ function cssHexToAssBgr(hex: string): string {
   return `&H00${b}${g}${r}`
 }
 
+/** Convert CSS hex (#AARRGGBB or #RRGGBB) to ASS BackColour format &HAABBGGRR */
+function cssHexToAssBackColor(hex: string): string {
+  const clean = hex.replace('#', '')
+  if (clean.length === 8) {
+    // #AARRGGBB -> &HAABBGGRR
+    const a = clean.substring(0, 2)
+    const r = clean.substring(2, 4)
+    const g = clean.substring(4, 6)
+    const b = clean.substring(6, 8)
+    return `&H${a}${b}${g}${r}`
+  }
+  const r = clean.substring(0, 2)
+  const g = clean.substring(2, 4)
+  const b = clean.substring(4, 6)
+  return `&H00${b}${g}${r}`
+}
+
+interface FullCaptionStyle {
+  fontName: string
+  fontFile: string
+  fontSize: number
+  primaryColor: string
+  highlightColor: string
+  outlineColor: string
+  backColor: string
+  outline: number
+  shadow: number
+  borderStyle: number
+  wordsPerLine: number
+  animation: 'karaoke-fill' | 'word-pop' | 'fade-in' | 'glow'
+}
+
+const DEFAULT_STYLE: FullCaptionStyle = {
+  fontName: 'Inter', fontFile: 'Inter-Bold.ttf',
+  fontSize: 0.05, primaryColor: '#FFFFFF', highlightColor: '#FFFF00',
+  outlineColor: '#000000', backColor: '#80000000',
+  outline: 3, shadow: 1, borderStyle: 1, wordsPerLine: 4, animation: 'karaoke-fill'
+}
+
+function buildAssHeader(width: number, height: number, styleLines: string[]): string {
+  return `[Script Info]
+ScriptType: v4.00+
+PlayResX: ${width}
+PlayResY: ${height}
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+${styleLines.join('\n')}
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
+}
+
 export interface RenderJob {
   id: string
   hookPath: string
@@ -44,6 +98,10 @@ export interface RenderJob {
   captionsAssPath?: string
   autoResize?: boolean
   resolution: { width: number; height: number }
+  titlePosition?: { x: number; y: number }
+  mediaOverlays?: { meat?: string; cta?: string }
+  mediaOverlayPosition?: { x: number; y: number }
+  meatDurationSec?: number
 }
 
 export interface RenderProgress {
@@ -90,7 +148,8 @@ function concatWithNormalization(
       const assContent = generateTextOverlayAssFile(
         job.textOverlay,
         job.hookDurationSec,
-        job.resolution
+        job.resolution,
+        job.titlePosition
       )
       const assPath = join(tmpdir(), `batchedit-textoverlay-${uuidv4()}.ass`)
       writeFileSync(assPath, assContent, 'utf-8')
@@ -99,6 +158,38 @@ function concatWithNormalization(
       const escaped = escapeFilterPath(assPath)
       filters.push(`${currentLabel}ass=${escaped}[vtxt]`)
       currentLabel = '[vtxt]'
+    }
+
+    // Media overlay images (proof images on meat/CTA segments)
+    // No -loop 1: the overlay filter's default eof_action=repeat reuses the single image frame
+    let nextInputIdx = 3
+    const extraInputPaths: string[] = []
+
+    if (job.mediaOverlays && (job.mediaOverlays.meat || job.mediaOverlays.cta)) {
+      const overlayW = Math.round(width * 0.8 / 2) * 2
+      const pos = job.mediaOverlayPosition || { x: 50, y: 75 }
+      const posX = Math.round(width * pos.x / 100)
+      const posY = Math.round(height * pos.y / 100)
+      const hookDur = job.hookDurationSec || 0
+      const meatDur = job.meatDurationSec || 0
+
+      if (job.mediaOverlays.meat) {
+        const idx = nextInputIdx++
+        extraInputPaths.push(normalize(job.mediaOverlays.meat))
+        const outLabel = `[vovl${idx}]`
+        filters.push(`[${idx}:v]scale=${overlayW}:-2[ovl_${idx}]`)
+        filters.push(`${currentLabel}[ovl_${idx}]overlay=x=${posX}-overlay_w/2:y=${posY}-overlay_h/2:enable='between(t,${hookDur},${hookDur + meatDur})':eof_action=pass${outLabel}`)
+        currentLabel = outLabel
+      }
+
+      if (job.mediaOverlays.cta) {
+        const idx = nextInputIdx++
+        extraInputPaths.push(normalize(job.mediaOverlays.cta))
+        const outLabel = `[vovl${idx}]`
+        filters.push(`[${idx}:v]scale=${overlayW}:-2[ovl_${idx}]`)
+        filters.push(`${currentLabel}[ovl_${idx}]overlay=x=${posX}-overlay_w/2:y=${posY}-overlay_h/2:enable='gte(t,${hookDur + meatDur})':eof_action=pass${outLabel}`)
+        currentLabel = outLabel
+      }
     }
 
     // Add ASS captions if provided (with fontsdir for bundled fonts)
@@ -115,6 +206,13 @@ function concatWithNormalization(
       .input(hookPath)
       .input(meatPath)
       .input(ctaPath)
+
+    // Add extra inputs for media overlays (still images, no special input options)
+    for (const imgPath of extraInputPaths) {
+      command.input(imgPath)
+    }
+
+    command
       .complexFilter(filters.join(';'))
       .outputOptions([
         '-y',
@@ -200,12 +298,14 @@ export function setupRenderPipeline(): void {
         segments: {
           wordChunks: { text: string; start: number; end: number }[]
           offsetMs: number
+          durationMs?: number
         }[]
         resolution: { width: number; height: number }
-        captionStyle?: { fontName: string; highlightColor: string }
+        captionStyle?: FullCaptionStyle
+        captionPosition?: { x: number; y: number }
       }
     ) => {
-      const assContent = generateCombinedAssFile(data.segments, data.resolution, data.captionStyle)
+      const assContent = generateCombinedAssFile(data.segments, data.resolution, data.captionStyle, data.captionPosition)
       const tmpPath = join(tmpdir(), `batchedit-karaoke-${uuidv4()}.ass`)
       writeFileSync(tmpPath, assContent, 'utf-8')
       return tmpPath
@@ -238,6 +338,24 @@ export function setupRenderPipeline(): void {
         results.push({ label: seg.label, bucket: seg.bucket, outputPath })
       }
       return results
+    }
+  )
+
+  // Detect leading silence duration
+  ipcMain.handle(
+    'ffmpeg:detectLeadingSilence',
+    async (_event, videoPath: string) => {
+      return detectLeadingSilence(videoPath)
+    }
+  )
+
+  // Trim leading silence from a clip
+  ipcMain.handle(
+    'ffmpeg:trimLeadingSilence',
+    async (_event, videoPath: string, outputDir?: string) => {
+      const dir = outputDir || tmpdir()
+      const outPath = join(dir, `batchedit-trimmed-${uuidv4()}.mp4`)
+      return trimLeadingSilence(videoPath, outPath)
     }
   )
 
@@ -369,86 +487,239 @@ export function formatAssTimestamp(ms: number): string {
 export function generateWordHighlightAssFile(
   wordChunks: { text: string; start: number; end: number }[],
   resolution: { width: number; height: number },
-  style?: { fontName: string; highlightColor: string }
+  style?: FullCaptionStyle,
+  position?: { x: number; y: number }
 ): string {
-  const { width, height } = resolution
-  const fontSize = Math.round(height * 0.05)
+  const s = style || DEFAULT_STYLE
+  switch (s.animation) {
+    case 'word-pop':
+      return generateWordPopAss(wordChunks, resolution, s, position)
+    case 'fade-in':
+      return generateFadeInAss(wordChunks, resolution, s, position)
+    case 'glow':
+      return generateGlowAss(wordChunks, resolution, s, position)
+    case 'karaoke-fill':
+    default:
+      return generateKaraokeFillAss(wordChunks, resolution, s, position)
+  }
+}
+
+function computeMarginV(
+  height: number, width: number,
+  position?: { x: number; y: number }
+): number {
+  if (position) return Math.max(0, Math.round(height * (1 - position.y / 100)))
   const isVertical916 = width * 16 <= height * 9
-  // 9:16: just below center (~65% from top); others: near bottom (5%)
-  const marginV = isVertical916 ? Math.round(height * 0.35) : Math.round(height * 0.05)
-  const fontName = style?.fontName || 'Arial'
-  const highlightBgr = style ? cssHexToAssBgr(style.highlightColor) : '&H0000FFFF'
+  return isVertical916 ? Math.round(height * 0.35) : Math.round(height * 0.05)
+}
 
-  const header = `[Script Info]
-ScriptType: v4.00+
-PlayResX: ${width}
-PlayResY: ${height}
-ScaledBorderAndShadow: yes
+type WordChunk = { text: string; start: number; end: number }
+type LineFormatter = (lineWords: WordChunk[], styleName: string) => string
 
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Karaoke,${fontName},${fontSize},${highlightBgr},&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,10,10,${marginV},1
+function buildAnimationStyleLine(
+  style: FullCaptionStyle,
+  fontSize: number,
+  marginV: number
+): { styleLine: string; styleName: string } {
+  const highlightBgr = cssHexToAssBgr(style.highlightColor)
+  const primaryBgr = cssHexToAssBgr(style.primaryColor)
+  const outlineBgr = cssHexToAssBgr(style.outlineColor)
+  const backColor = cssHexToAssBackColor(style.backColor)
 
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
-
-  // Group words into display lines of ~4 words each
-  const lines: { text: string; start: number; end: number }[][] = []
-  for (let i = 0; i < wordChunks.length; i += 4) {
-    lines.push(wordChunks.slice(i, i + 4))
+  if (style.animation === 'fade-in') {
+    return {
+      styleName: 'FadeIn',
+      styleLine: `Style: FadeIn,${style.fontName},${fontSize},${primaryBgr},&H00FFFFFF,${outlineBgr},${backColor},-1,0,0,0,100,100,0,0,${style.borderStyle},${style.outline},${style.shadow},2,10,10,${marginV},1`
+    }
   }
 
-  const dialogueLines = lines.map((lineWords) => {
-    const lineStart = lineWords[0].start * 1000 // seconds -> ms
-    const lineEnd = lineWords[lineWords.length - 1].end * 1000
+  return {
+    styleName: 'Karaoke',
+    styleLine: `Style: Karaoke,${style.fontName},${fontSize},${highlightBgr},${primaryBgr},${outlineBgr},${backColor},-1,0,0,0,100,100,0,0,${style.borderStyle},${style.outline},${style.shadow},2,10,10,${marginV},1`
+  }
+}
 
-    // Build karaoke tags: each word gets \kf<centiseconds>
-    const karaokeText = lineWords
-      .map((word) => {
-        const durationCs = Math.round((word.end - word.start) * 100)
-        return `{\\kf${durationCs}}${word.text}`
-      })
-      .join(' ')
+function karaokeFillFormatLine(lineWords: WordChunk[], styleName: string): string {
+  const lineStart = lineWords[0].start * 1000
+  const lineEnd = lineWords[lineWords.length - 1].end * 1000
+  const karaokeText = lineWords
+    .map((word) => {
+      const durationCs = Math.round((word.end - word.start) * 100)
+      return `{\\kf${durationCs}}${word.text}`
+    })
+    .join(' ')
+  return `Dialogue: 0,${formatAssTimestamp(lineStart)},${formatAssTimestamp(lineEnd)},${styleName},,0,0,0,,${karaokeText}`
+}
 
-    const start = formatAssTimestamp(lineStart)
-    const end = formatAssTimestamp(lineEnd)
-    return `Dialogue: 0,${start},${end},Karaoke,,0,0,0,,${karaokeText}`
-  })
+function wordPopFormatLine(lineWords: WordChunk[], styleName: string): string {
+  const lineStart = lineWords[0].start * 1000
+  const lineEnd = lineWords[lineWords.length - 1].end * 1000
+  const karaokeText = lineWords
+    .map((word) => {
+      const durationCs = Math.round((word.end - word.start) * 100)
+      return `{\\kf${durationCs}}${word.text}`
+    })
+    .join(' ')
+  const popTag = `{\\t(0,150,\\fscx115\\fscy115)\\t(150,350,\\fscx100\\fscy100)}`
+  return `Dialogue: 0,${formatAssTimestamp(lineStart)},${formatAssTimestamp(lineEnd)},${styleName},,0,0,0,,${popTag}${karaokeText}`
+}
 
+function fadeInFormatLine(lineWords: WordChunk[], styleName: string): string {
+  const lineStart = lineWords[0].start * 1000
+  const lineEnd = lineWords[lineWords.length - 1].end * 1000
+  const text = lineWords.map((w) => w.text).join(' ')
+  return `Dialogue: 0,${formatAssTimestamp(lineStart)},${formatAssTimestamp(lineEnd)},${styleName},,0,0,0,,{\\fad(200,200)}${text}`
+}
+
+function glowFormatLine(lineWords: WordChunk[], styleName: string): string {
+  const lineStart = lineWords[0].start * 1000
+  const lineEnd = lineWords[lineWords.length - 1].end * 1000
+  const karaokeText = lineWords
+    .map((word) => {
+      const durationCs = Math.round((word.end - word.start) * 100)
+      return `{\\kf${durationCs}}${word.text}`
+    })
+    .join(' ')
+  return `Dialogue: 0,${formatAssTimestamp(lineStart)},${formatAssTimestamp(lineEnd)},${styleName},,0,0,0,,{\\blur3}${karaokeText}`
+}
+
+function getLineFormatter(animation: FullCaptionStyle['animation']): LineFormatter {
+  switch (animation) {
+    case 'word-pop': return wordPopFormatLine
+    case 'fade-in': return fadeInFormatLine
+    case 'glow': return glowFormatLine
+    case 'karaoke-fill':
+    default: return karaokeFillFormatLine
+  }
+}
+
+function generateDialogueLines(
+  chunks: WordChunk[],
+  wordsPerLine: number,
+  styleName: string,
+  formatLine: LineFormatter
+): string[] {
+  const groups: WordChunk[][] = []
+  for (let i = 0; i < chunks.length; i += wordsPerLine) {
+    groups.push(chunks.slice(i, i + wordsPerLine))
+  }
+  return groups.map((lineWords) => formatLine(lineWords, styleName))
+}
+
+function generateKaraokeFillAss(
+  wordChunks: { text: string; start: number; end: number }[],
+  resolution: { width: number; height: number },
+  style: FullCaptionStyle,
+  position?: { x: number; y: number }
+): string {
+  const { width, height } = resolution
+  const fontSize = Math.round(height * style.fontSize)
+  const marginV = computeMarginV(height, width, position)
+  const { styleLine, styleName } = buildAnimationStyleLine(style, fontSize, marginV)
+  const header = buildAssHeader(width, height, [styleLine])
+  const dialogueLines = generateDialogueLines(wordChunks, style.wordsPerLine, styleName, karaokeFillFormatLine)
+  return header + '\n' + dialogueLines.join('\n') + '\n'
+}
+
+function generateWordPopAss(
+  wordChunks: { text: string; start: number; end: number }[],
+  resolution: { width: number; height: number },
+  style: FullCaptionStyle,
+  position?: { x: number; y: number }
+): string {
+  const { width, height } = resolution
+  const fontSize = Math.round(height * style.fontSize)
+  const marginV = computeMarginV(height, width, position)
+  const { styleLine, styleName } = buildAnimationStyleLine(style, fontSize, marginV)
+  const header = buildAssHeader(width, height, [styleLine])
+  const dialogueLines = generateDialogueLines(wordChunks, style.wordsPerLine, styleName, wordPopFormatLine)
+  return header + '\n' + dialogueLines.join('\n') + '\n'
+}
+
+function generateFadeInAss(
+  wordChunks: { text: string; start: number; end: number }[],
+  resolution: { width: number; height: number },
+  style: FullCaptionStyle,
+  position?: { x: number; y: number }
+): string {
+  const { width, height } = resolution
+  const fontSize = Math.round(height * style.fontSize)
+  const marginV = computeMarginV(height, width, position)
+  const { styleLine, styleName } = buildAnimationStyleLine(style, fontSize, marginV)
+  const header = buildAssHeader(width, height, [styleLine])
+  const dialogueLines = generateDialogueLines(wordChunks, style.wordsPerLine, styleName, fadeInFormatLine)
+  return header + '\n' + dialogueLines.join('\n') + '\n'
+}
+
+function generateGlowAss(
+  wordChunks: { text: string; start: number; end: number }[],
+  resolution: { width: number; height: number },
+  style: FullCaptionStyle,
+  position?: { x: number; y: number }
+): string {
+  const { width, height } = resolution
+  const fontSize = Math.round(height * style.fontSize)
+  const marginV = computeMarginV(height, width, position)
+  const { styleLine, styleName } = buildAnimationStyleLine(style, fontSize, marginV)
+  const header = buildAssHeader(width, height, [styleLine])
+  const dialogueLines = generateDialogueLines(wordChunks, style.wordsPerLine, styleName, glowFormatLine)
   return header + '\n' + dialogueLines.join('\n') + '\n'
 }
 
 export function generateCombinedAssFile(
-  segments: { wordChunks: { text: string; start: number; end: number }[]; offsetMs: number }[],
+  segments: { wordChunks: { text: string; start: number; end: number }[]; offsetMs: number; durationMs?: number }[],
   resolution: { width: number; height: number },
-  style?: { fontName: string; highlightColor: string }
+  style?: FullCaptionStyle,
+  position?: { x: number; y: number }
 ): string {
-  // Combine all segments with their time offsets applied
-  const allChunks: { text: string; start: number; end: number }[] = []
+  const s = style || DEFAULT_STYLE
+  const { width, height } = resolution
+  const fontSize = Math.round(height * s.fontSize)
+  const marginV = computeMarginV(height, width, position)
+
+  const { styleLine, styleName } = buildAnimationStyleLine(s, fontSize, marginV)
+  const header = buildAssHeader(width, height, [styleLine])
+  const formatLine = getLineFormatter(s.animation)
+
+  const allDialogueLines: string[] = []
 
   for (const segment of segments) {
     const offsetSec = segment.offsetMs / 1000
+    const durationSec = segment.durationMs != null ? segment.durationMs / 1000 : undefined
+
+    const adjusted: WordChunk[] = []
     for (const chunk of segment.wordChunks) {
-      allChunks.push({
-        text: chunk.text,
-        start: chunk.start + offsetSec,
-        end: chunk.end + offsetSec
-      })
+      const start = chunk.start + offsetSec
+      const end = chunk.end + offsetSec
+
+      if (durationSec != null) {
+        const segEnd = offsetSec + durationSec
+        // Skip words that start at or after segment end
+        if (start >= segEnd) continue
+        adjusted.push({ text: chunk.text, start, end: Math.min(end, segEnd) })
+      } else {
+        adjusted.push({ text: chunk.text, start, end })
+      }
     }
+
+    // Group this segment's words independently (no cross-clip bleed)
+    const lines = generateDialogueLines(adjusted, s.wordsPerLine, styleName, formatLine)
+    allDialogueLines.push(...lines)
   }
 
-  return generateWordHighlightAssFile(allChunks, resolution, style)
+  return header + '\n' + allDialogueLines.join('\n') + '\n'
 }
 
 function generateTextOverlayAssFile(
   text: string,
   durationSec: number,
-  resolution: { width: number; height: number }
+  resolution: { width: number; height: number },
+  position?: { x: number; y: number }
 ): string {
   const { width, height } = resolution
   const fontSize = Math.round(height * 0.035)
   const isVertical916 = width * 16 <= height * 9
-  const marginV = isVertical916 ? Math.round(height * 0.12) : Math.round(height * 0.03)
+  const defaultMarginV = isVertical916 ? Math.round(height * 0.12) : Math.round(height * 0.03)
 
   // Estimate box dimensions based on text length and font size
   const charWidth = fontSize * 0.55
@@ -459,9 +730,13 @@ function generateTextOverlayAssFile(
   const boxH = fontSize + padY * 2
   const r = 33 // corner radius
 
-  // Position: top-center, offset by marginV from top (alignment 8)
-  const boxX = Math.round((width - boxW) / 2)
-  const boxY = marginV
+  // Position: use template position or default top-center
+  const boxX = position
+    ? Math.max(0, Math.round(width * (position.x / 100) - boxW / 2))
+    : Math.round((width - boxW) / 2)
+  const boxY = position
+    ? Math.round(height * (position.y / 100))
+    : defaultMarginV
 
   // ASS \p1 drawing for rounded rectangle (relative coordinates)
   // m = moveto, l = lineto, b = cubic bezier
@@ -484,7 +759,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TextOverlay,Arial,${fontSize},&H00000000,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,10,10,${marginV},1
+Style: TextOverlay,Arial,${fontSize},&H00000000,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,10,10,${defaultMarginV},1
 Style: TextBox,Arial,${fontSize},&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
 
 [Events]
@@ -497,7 +772,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
   // Layer 0: white rounded-rect background drawn at absolute position
   const bgLine = `Dialogue: 0,${start},${end},TextBox,,0,0,0,,{\\pos(${boxX},${boxY})\\p1}${roundedRect}{\\p0}`
   // Layer 1: black text centered in the box
-  const textPosX = Math.round(width / 2)
+  const textPosX = position
+    ? Math.round(width * (position.x / 100))
+    : Math.round(width / 2)
   const textPosY = Math.round(boxY + boxH / 2)
   const textLine = `Dialogue: 1,${start},${end},TextOverlay,,0,0,0,,{\\pos(${textPosX},${textPosY})}${escaped}`
 

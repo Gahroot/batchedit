@@ -118,4 +118,51 @@ export function trimVideo(
   })
 }
 
+export function parseSilenceEnd(line: string): number | null {
+  const match = line.match(/silence_end:\s*([\d.]+)/)
+  return match ? parseFloat(match[1]) : null
+}
+
+export function detectLeadingSilence(
+  filePath: string,
+  noiseDb = -40,
+  minDuration = 0.1
+): Promise<number> {
+  return new Promise((resolve) => {
+    const nullDev = process.platform === 'win32' ? 'NUL' : '/dev/null'
+    let firstSilenceEnd: number | null = null
+
+    ffmpeg(filePath)
+      .audioFilters(`silencedetect=noise=${noiseDb}dB:d=${minDuration}`)
+      .format('null')
+      .output(nullDev)
+      .on('stderr', (line: string) => {
+        if (firstSilenceEnd === null) {
+          const val = parseSilenceEnd(line)
+          if (val !== null) firstSilenceEnd = val
+        }
+      })
+      .on('end', () => resolve(firstSilenceEnd ?? 0))
+      .on('error', () => resolve(0))
+      .run()
+  })
+}
+
+export async function trimLeadingSilence(
+  inputPath: string,
+  outputPath: string,
+  safetyMarginSec = 0.05
+): Promise<{ outputPath: string; trimmedSeconds: number }> {
+  const silenceEnd = await detectLeadingSilence(inputPath)
+
+  if (silenceEnd < 0.1) {
+    return { outputPath: inputPath, trimmedSeconds: 0 }
+  }
+
+  const trimStart = Math.max(0, silenceEnd - safetyMarginSec)
+  const meta = await getVideoMetadata(inputPath)
+  await trimVideo(inputPath, outputPath, trimStart, meta.duration)
+  return { outputPath, trimmedSeconds: trimStart }
+}
+
 export { ffmpeg }
