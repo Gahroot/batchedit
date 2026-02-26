@@ -211,7 +211,20 @@ export function ClipSplitter() {
         endTime: m.endTime
       }))
       const results = await window.api.splitVideo(videoPath, segments, dir)
-      setSplitResults(results)
+
+      // Trim leading silence from each split clip
+      const trimmedResults = await Promise.all(
+        results.map(async (r) => {
+          try {
+            const trimResult = await window.api.trimLeadingSilence(r.outputPath)
+            return { ...r, outputPath: trimResult.outputPath }
+          } catch {
+            return r
+          }
+        })
+      )
+
+      setSplitResults(trimmedResults)
       setStep('done')
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -232,7 +245,19 @@ export function ClipSplitter() {
         startTime: m.startTime,
         endTime: m.endTime
       }))
-      const results = await window.api.splitVideo(videoPath, segments, null)
+      const rawResults = await window.api.splitVideo(videoPath, segments, null)
+
+      // Trim leading silence from each split clip
+      const results = await Promise.all(
+        rawResults.map(async (r) => {
+          try {
+            const trimResult = await window.api.trimLeadingSilence(r.outputPath)
+            return { ...r, outputPath: trimResult.outputPath }
+          } catch {
+            return r
+          }
+        })
+      )
       setSplitResults(results)
 
       // Add clips to buckets
