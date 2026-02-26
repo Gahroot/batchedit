@@ -128,42 +128,60 @@ export function parseSilenceEnd(line: string): number | null {
   return match ? parseFloat(match[1]) : null
 }
 
-export function detectLeadingSilence(
+export interface SilenceBounds {
+  leadingEnd: number
+  lastSilenceStart: number | null
+  lastSilenceEnd: number | null
+}
+
+export function detectSilenceBounds(
   filePath: string,
   noiseDb = -40,
   minDuration = 0.1
-): Promise<number> {
+): Promise<SilenceBounds> {
   return new Promise((resolve) => {
     const nullDev = process.platform === 'win32' ? 'NUL' : '/dev/null'
     let firstSilenceStart: number | null = null
-    let result: number | null = null
+    let leadingEnd = 0
+    let leadingResolved = false
+    let lastSilenceStart: number | null = null
+    let lastSilenceEnd: number | null = null
 
     ffmpeg(filePath)
       .audioFilters(`silencedetect=noise=${noiseDb}dB:d=${minDuration}`)
       .format('null')
       .output(nullDev)
       .on('stderr', (line: string) => {
-        if (result !== null) return
-
         const startVal = parseSilenceStart(line)
-        if (startVal !== null && firstSilenceStart === null) {
-          firstSilenceStart = startVal
+        if (startVal !== null) {
+          if (firstSilenceStart === null) firstSilenceStart = startVal
+          lastSilenceStart = startVal
         }
 
         const endVal = parseSilenceEnd(line)
         if (endVal !== null) {
-          // Only count as leading silence if it starts at/near 0
-          if (firstSilenceStart !== null && firstSilenceStart < 0.01) {
-            result = endVal
-          } else {
-            result = 0
+          if (!leadingResolved) {
+            if (firstSilenceStart !== null && firstSilenceStart < 0.01) {
+              leadingEnd = endVal
+            }
+            leadingResolved = true
           }
+          lastSilenceEnd = endVal
         }
       })
-      .on('end', () => resolve(result ?? 0))
-      .on('error', () => resolve(0))
+      .on('end', () => resolve({ leadingEnd, lastSilenceStart, lastSilenceEnd }))
+      .on('error', () => resolve({ leadingEnd: 0, lastSilenceStart: null, lastSilenceEnd: null }))
       .run()
   })
+}
+
+export async function detectLeadingSilence(
+  filePath: string,
+  noiseDb = -40,
+  minDuration = 0.1
+): Promise<number> {
+  const bounds = await detectSilenceBounds(filePath, noiseDb, minDuration)
+  return bounds.leadingEnd
 }
 
 export async function trimLeadingSilence(
@@ -171,16 +189,41 @@ export async function trimLeadingSilence(
   outputPath: string,
   safetyMarginSec = 0.05
 ): Promise<{ outputPath: string; trimmedSeconds: number }> {
-  const silenceEnd = await detectLeadingSilence(inputPath)
+  const bounds = await detectSilenceBounds(inputPath)
+  const meta = await getVideoMetadata(inputPath)
 
-  if (silenceEnd < 0.1) {
+  // Leading: trim if silence >= 100ms at start
+  const trimStart = bounds.leadingEnd >= 0.1
+    ? Math.max(0, bounds.leadingEnd - safetyMarginSec)
+    : 0
+
+  // Trailing: trim if last silence region extends to end of file
+  let trimEnd = meta.duration
+  if (bounds.lastSilenceStart !== null) {
+    // File ends mid-silence (no matching silence_end)
+    const inSilence = bounds.lastSilenceEnd === null
+      || bounds.lastSilenceStart > bounds.lastSilenceEnd
+    // Last silence_end reaches file end
+    const endsAtFile = bounds.lastSilenceEnd !== null
+      && (meta.duration - bounds.lastSilenceEnd) < 0.05
+
+    if (inSilence || endsAtFile) {
+      trimEnd = Math.min(meta.duration, bounds.lastSilenceStart + safetyMarginSec)
+    }
+  }
+
+  const totalTrimmed = trimStart + (meta.duration - trimEnd)
+  if (totalTrimmed < 0.1) {
     return { outputPath: inputPath, trimmedSeconds: 0 }
   }
 
-  const trimStart = Math.max(0, silenceEnd - safetyMarginSec)
-  const meta = await getVideoMetadata(inputPath)
-  await trimVideo(inputPath, outputPath, trimStart, meta.duration)
-  return { outputPath, trimmedSeconds: trimStart }
+  // Guard: don't trim to nothing
+  if (trimEnd - trimStart < 0.2) {
+    return { outputPath: inputPath, trimmedSeconds: 0 }
+  }
+
+  await trimVideo(inputPath, outputPath, trimStart, trimEnd)
+  return { outputPath, trimmedSeconds: totalTrimmed }
 }
 
 export { ffmpeg }
