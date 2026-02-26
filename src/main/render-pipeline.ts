@@ -161,7 +161,7 @@ function concatWithNormalization(
     }
 
     // Media overlay images (proof images on meat/CTA segments)
-    // No -loop 1: the overlay filter's default eof_action=repeat reuses the single image frame
+    // -loop 1 on input produces continuous frames; eof_action=repeat as safety net
     let nextInputIdx = 3
     const extraInputPaths: string[] = []
 
@@ -178,7 +178,7 @@ function concatWithNormalization(
         extraInputPaths.push(normalize(job.mediaOverlays.meat))
         const outLabel = `[vovl${idx}]`
         filters.push(`[${idx}:v]scale=${overlayW}:-2[ovl_${idx}]`)
-        filters.push(`${currentLabel}[ovl_${idx}]overlay=x=${posX}-overlay_w/2:y=${posY}-overlay_h/2:enable='between(t,${hookDur},${hookDur + meatDur})':eof_action=pass${outLabel}`)
+        filters.push(`${currentLabel}[ovl_${idx}]overlay=x=${posX}-overlay_w/2:y=${posY}-overlay_h/2:enable='between(t,${hookDur},${hookDur + meatDur})':eof_action=repeat${outLabel}`)
         currentLabel = outLabel
       }
 
@@ -187,7 +187,7 @@ function concatWithNormalization(
         extraInputPaths.push(normalize(job.mediaOverlays.cta))
         const outLabel = `[vovl${idx}]`
         filters.push(`[${idx}:v]scale=${overlayW}:-2[ovl_${idx}]`)
-        filters.push(`${currentLabel}[ovl_${idx}]overlay=x=${posX}-overlay_w/2:y=${posY}-overlay_h/2:enable='gte(t,${hookDur + meatDur})':eof_action=pass${outLabel}`)
+        filters.push(`${currentLabel}[ovl_${idx}]overlay=x=${posX}-overlay_w/2:y=${posY}-overlay_h/2:enable='gte(t,${hookDur + meatDur})':eof_action=repeat${outLabel}`)
         currentLabel = outLabel
       }
     }
@@ -207,7 +207,8 @@ function concatWithNormalization(
       .input(meatPath)
       .input(ctaPath)
 
-    // Add extra inputs for media overlays (still images, no special input options)
+    // Add extra inputs for media overlays (eof_action=repeat on each overlay
+    // filter repeats the single image frame for the full duration)
     for (const imgPath of extraInputPaths) {
       command.input(imgPath)
     }

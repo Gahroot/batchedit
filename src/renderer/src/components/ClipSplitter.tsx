@@ -416,7 +416,7 @@ export function ClipSplitter() {
               </div>
             )}
 
-            <ScrollArea className="max-h-40 min-h-0">
+            <ScrollArea className="max-h-60 min-h-0">
               <div className="space-y-1.5 pr-3">
                 {markers.map((m) => (
                   <div key={m.id} className="flex items-center gap-2 text-xs">

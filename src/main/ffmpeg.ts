@@ -118,6 +118,11 @@ export function trimVideo(
   })
 }
 
+export function parseSilenceStart(line: string): number | null {
+  const match = line.match(/silence_start:\s*([\d.]+)/)
+  return match ? parseFloat(match[1]) : null
+}
+
 export function parseSilenceEnd(line: string): number | null {
   const match = line.match(/silence_end:\s*([\d.]+)/)
   return match ? parseFloat(match[1]) : null
@@ -130,19 +135,32 @@ export function detectLeadingSilence(
 ): Promise<number> {
   return new Promise((resolve) => {
     const nullDev = process.platform === 'win32' ? 'NUL' : '/dev/null'
-    let firstSilenceEnd: number | null = null
+    let firstSilenceStart: number | null = null
+    let result: number | null = null
 
     ffmpeg(filePath)
       .audioFilters(`silencedetect=noise=${noiseDb}dB:d=${minDuration}`)
       .format('null')
       .output(nullDev)
       .on('stderr', (line: string) => {
-        if (firstSilenceEnd === null) {
-          const val = parseSilenceEnd(line)
-          if (val !== null) firstSilenceEnd = val
+        if (result !== null) return
+
+        const startVal = parseSilenceStart(line)
+        if (startVal !== null && firstSilenceStart === null) {
+          firstSilenceStart = startVal
+        }
+
+        const endVal = parseSilenceEnd(line)
+        if (endVal !== null) {
+          // Only count as leading silence if it starts at/near 0
+          if (firstSilenceStart !== null && firstSilenceStart < 0.01) {
+            result = endVal
+          } else {
+            result = 0
+          }
         }
       })
-      .on('end', () => resolve(firstSilenceEnd ?? 0))
+      .on('end', () => resolve(result ?? 0))
       .on('error', () => resolve(0))
       .run()
   })

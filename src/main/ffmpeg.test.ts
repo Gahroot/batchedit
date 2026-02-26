@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseSilenceEnd } from './ffmpeg'
+import { parseSilenceEnd, parseSilenceStart } from './ffmpeg'
 
 describe('parseSilenceEnd', () => {
   it('extracts silence_end from a valid FFmpeg line', () => {
@@ -24,5 +24,30 @@ describe('parseSilenceEnd', () => {
 
   it('handles large decimal values', () => {
     expect(parseSilenceEnd('silence_end: 12.345678 | silence_duration: 12.345678')).toBe(12.345678)
+  })
+})
+
+describe('parseSilenceStart', () => {
+  it('extracts silence_start from a valid FFmpeg line', () => {
+    expect(
+      parseSilenceStart('[silencedetect @ 0x...] silence_start: 0')
+    ).toBe(0)
+  })
+
+  it('extracts non-zero silence_start', () => {
+    expect(
+      parseSilenceStart('[silencedetect @ 0x...] silence_start: 1.823')
+    ).toBe(1.823)
+  })
+
+  it('returns null for silence_end lines', () => {
+    expect(
+      parseSilenceStart('silence_end: 0.512 | silence_duration: 0.512')
+    ).toBeNull()
+  })
+
+  it('returns null for non-matching lines', () => {
+    expect(parseSilenceStart('frame= 100 fps=30 q=28.0 size= 256kB')).toBeNull()
+    expect(parseSilenceStart('')).toBeNull()
   })
 })
