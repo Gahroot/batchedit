@@ -6,28 +6,32 @@ Electron desktop app that generates combinatorial video permutations from ad cre
 
 ```
 src/
-├── main/                          # Electron main process
-│   ├── index.ts                   # App lifecycle, window creation, IPC handlers
-│   ├── ffmpeg.ts                  # FFmpeg/ffprobe binary setup + helpers
-│   └── render-pipeline.ts         # Batch render, thumbnails, ASS subtitle generation
+├── main/                              # Electron main process
+│   ├── index.ts                       # App lifecycle, window creation, IPC handlers
+│   ├── ffmpeg.ts                      # FFmpeg/ffprobe binary setup + helpers
+│   └── render-pipeline.ts             # Batch render, thumbnails, ASS subtitle generation
 │
-├── preload/                       # IPC bridge (renderer <-> main)
-│   ├── index.ts                   # contextBridge API exposure
-│   └── index.d.ts                 # TypeScript types for window.api
+├── preload/                           # IPC bridge (renderer <-> main)
+│   ├── index.ts                       # contextBridge API exposure
+│   └── index.d.ts                     # TypeScript types for window.api
 │
-└── renderer/src/                  # React 19 UI
-    ├── App.tsx                    # Root layout (header, buckets, render panel)
-    ├── store.ts                   # Zustand store (clips, settings, render state)
+└── renderer/src/                      # React 19 UI
+    ├── App.tsx                        # Root layout (header, buckets, render panel)
+    ├── store.ts                       # Zustand store (clips, settings, render state)
     ├── components/
-    │   ├── Bucket.tsx             # Clip bucket (drag-drop, thumbnails, reorder)
-    │   ├── SortableClip.tsx       # @dnd-kit sortable wrapper
-    │   ├── SettingsBar.tsx        # Resolution + output directory
-    │   ├── RenderPanel.tsx        # Render controls + Whisper caption pipeline
-    │   ├── WhisperStatus.tsx      # Model download/transcription progress
-    │   └── ui/                    # ShadCN components (do not edit manually)
-    ├── hooks/useWhisper.ts        # Whisper Web Worker lifecycle hook
-    ├── workers/whisper.worker.ts  # @huggingface/transformers pipeline
-    └── lib/utils.ts               # cn() class merge utility
+    │   ├── Bucket.tsx                 # Clip bucket (drag-drop, thumbnails, reorder)
+    │   ├── SortableClip.tsx           # @dnd-kit sortable wrapper
+    │   ├── SettingsBar.tsx            # Resolution + output directory
+    │   ├── RenderPanel.tsx            # Render controls + Whisper caption pipeline
+    │   ├── ClipSplitter.tsx           # Dialog: upload → transcribe → review → split
+    │   ├── WhisperStatus.tsx          # Model download/transcription progress
+    │   ├── ErrorLog.tsx               # Copyable error log for render failures
+    │   └── ui/                        # ShadCN components (do not edit manually)
+    ├── hooks/useWhisper.ts            # Whisper Web Worker lifecycle hook
+    ├── workers/whisper.worker.ts      # @huggingface/transformers pipeline
+    └── lib/
+        ├── utils.ts                   # cn() class merge utility
+        └── marker-detection.ts        # Whisper marker detection (fuzzy match, homophones)
 ```
 
 ## Organization Rules
@@ -38,6 +42,7 @@ src/
 - **ShadCN UI** -> `src/renderer/src/components/ui/`, auto-generated (use `npx shadcn@latest add <component>`)
 - **Hooks** -> `src/renderer/src/hooks/`
 - **Workers** -> `src/renderer/src/workers/`
+- **Tests** -> co-located next to source files (e.g. `store.test.ts`, `Bucket.test.ts`)
 - Path alias: `@/` maps to `src/renderer/src/`
 - Config file: `electron.vite.config.ts` (dot, not dash)
 
@@ -50,6 +55,12 @@ npx electron-vite build
 ```
 
 Fix ALL errors before continuing. The build includes TypeScript type checking.
+
+To run tests:
+
+```bash
+npm test
+```
 
 For development with hot reload:
 
