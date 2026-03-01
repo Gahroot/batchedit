@@ -52,15 +52,20 @@ self.onmessage = async (e: MessageEvent) => {
         const PAD_SEC = 0.5    // silence padding prepended for better alignment
         const PAD_SAMPLES = Math.floor(PAD_SEC * SAMPLE_RATE)
 
-        /** Parse raw Whisper chunks: null-safe, offset timestamps, cap hallucinated durations */
+        /** Parse raw Whisper chunks: null-safe, offset timestamps, remove hallucinated durations */
         const parseChunks = (raw: any, offset = 0) =>
           (raw.chunks || [])
-            .filter((c: any) => c.text?.trim().length > 0 && c.timestamp?.[0] != null && c.timestamp?.[1] != null)
-            .map((c: any) => {
-              const s: number = c.timestamp[0] + offset
-              const rawE: number = c.timestamp[1] + offset
-              return { text: c.text.trim(), start: s, end: rawE - s > MAX_WORD_SEC ? s + 0.5 : rawE }
-            })
+            .filter((c: any) =>
+              c.text?.trim().length > 0 &&
+              c.timestamp?.[0] != null &&
+              c.timestamp?.[1] != null &&
+              (c.timestamp[1] - c.timestamp[0]) <= MAX_WORD_SEC
+            )
+            .map((c: any) => ({
+              text: c.text.trim(),
+              start: (c.timestamp[0] as number) + offset,
+              end: (c.timestamp[1] as number) + offset
+            }))
 
         /** Find gaps > MIN_GAP_SEC in sorted word chunks */
         const findGaps = (chunks: Array<{ start: number; end: number }>, totalDuration: number) => {

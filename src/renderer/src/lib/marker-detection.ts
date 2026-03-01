@@ -161,6 +161,52 @@ function matchBucketMulti(
   return null
 }
 
+const MIN_CLIP_SEC = 0.5
+
+/** Compute start/end times for markers based on content word positions */
+function computeTimings(
+  markers: DetectedMarker[],
+  wordChunks: WhisperChunk[],
+  used: Set<number>,
+  videoDuration: number
+): void {
+  for (let i = 0; i < markers.length; i++) {
+    const lastMarkerIdx = markers[i].markerChunkIndices[markers[i].markerChunkIndices.length - 1]
+    const nextWordIdx = lastMarkerIdx + 1
+    markers[i].startTime = nextWordIdx < wordChunks.length
+      ? wordChunks[nextWordIdx].start
+      : wordChunks[lastMarkerIdx].end
+
+    const boundaryIdx = i + 1 < markers.length
+      ? markers[i + 1].markerChunkIndices[0]
+      : wordChunks.length
+
+    let lastContentEnd = markers[i].startTime
+    for (let j = boundaryIdx - 1; j >= nextWordIdx; j--) {
+      if (!used.has(j)) {
+        lastContentEnd = wordChunks[j].end
+        break
+      }
+    }
+
+    const nextMarkerStart = i + 1 < markers.length
+      ? wordChunks[markers[i + 1].markerChunkIndices[0]].start
+      : videoDuration
+
+    if (lastContentEnd > markers[i].startTime) {
+      // Content words found → use adaptive buffer
+      const silenceGap = nextMarkerStart - lastContentEnd
+      const buffer = silenceGap > 0.5 ? 0.1 : 0.2
+      markers[i].endTime = Math.min(lastContentEnd + buffer, nextMarkerStart, videoDuration)
+    } else {
+      // No content words found — Whisper couldn't transcribe this section,
+      // but audio content exists between markers. Extend to boundary;
+      // post-split trimLeadingSilence() handles trailing silence.
+      markers[i].endTime = Math.min(nextMarkerStart, videoDuration)
+    }
+  }
+}
+
 let nextId = 1
 
 export function detectMarkers(wordChunks: WhisperChunk[], videoDuration: number): DetectedMarker[] {
@@ -283,40 +329,14 @@ export function detectMarkers(wordChunks: WhisperChunk[], videoDuration: number)
   }
   const dedupedMarkers = markers.filter((_, i) => !removedIndices.has(i))
 
-  // Set start/end times: content starts after the marker phrase, ends with adaptive buffer capped at next marker
-  for (let i = 0; i < dedupedMarkers.length; i++) {
-    const lastMarkerIdx = dedupedMarkers[i].markerChunkIndices[dedupedMarkers[i].markerChunkIndices.length - 1]
-    const nextWordIdx = lastMarkerIdx + 1
-    dedupedMarkers[i].startTime = nextWordIdx < wordChunks.length
-      ? wordChunks[nextWordIdx].start
-      : wordChunks[lastMarkerIdx].end
+  // Compute initial timings
+  computeTimings(dedupedMarkers, wordChunks, used, videoDuration)
 
-    // Find the boundary: either the next marker's first chunk index, or end of chunks
-    const boundaryIdx = i + 1 < dedupedMarkers.length
-      ? dedupedMarkers[i + 1].markerChunkIndices[0]
-      : wordChunks.length
+  // Drop markers producing unusably short clips (hallucinated rapid-fire markers)
+  const validMarkers = dedupedMarkers.filter(m => m.endTime - m.startTime >= MIN_CLIP_SEC)
 
-    // Find last non-marker content word before the boundary
-    let lastContentEnd = dedupedMarkers[i].startTime
-    for (let j = boundaryIdx - 1; j >= nextWordIdx; j--) {
-      if (!used.has(j)) {
-        lastContentEnd = wordChunks[j].end
-        break
-      }
-    }
+  // Recompute — removing bad markers shifts boundaries outward for survivors
+  computeTimings(validMarkers, wordChunks, used, videoDuration)
 
-    // Hard cap: next marker's first word start, or videoDuration for last clip
-    const nextMarkerStart = i + 1 < dedupedMarkers.length
-      ? wordChunks[dedupedMarkers[i + 1].markerChunkIndices[0]].start
-      : videoDuration
-
-    // Adaptive buffer: large silence gap (>0.5s) → content clearly ended → 0.1s
-    // Smaller gap → 0.2s to protect trailing speech
-    const silenceGap = nextMarkerStart - lastContentEnd
-    const buffer = silenceGap > 0.5 ? 0.1 : 0.2
-
-    dedupedMarkers[i].endTime = Math.min(lastContentEnd + buffer, nextMarkerStart, videoDuration)
-  }
-
-  return dedupedMarkers
+  return validMarkers
 }

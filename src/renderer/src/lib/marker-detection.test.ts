@@ -213,3 +213,80 @@ describe('detectMarkers — adaptive end time buffer', () => {
     expect(result[0].endTime).toBe(2.7)
   })
 })
+
+describe('detectMarkers — no-content fallback', () => {
+  it('no content words between markers → endTime extends to next marker boundary', () => {
+    // Hook 1 (bad take) → [poisoned] → Hook 2 → [poisoned] → Hook 1 (retake) → good content
+    // After dedup: first Hook 1 removed, poison covers indices 0–5.
+    // Hook 2 has no non-poisoned content words before Hook 1 retake.
+    const chunks: WhisperChunk[] = [
+      { text: 'hook', start: 0, end: 0.3 },       // 0 - first Hook 1 (removed)
+      { text: '1', start: 0.5, end: 0.8 },         // 1
+      { text: 'bad', start: 1.0, end: 1.5 },       // 2 - poisoned
+      { text: 'hook', start: 3.0, end: 3.3 },      // 3 - Hook 2
+      { text: '2', start: 3.5, end: 3.8 },         // 4
+      { text: 'stuff', start: 5.0, end: 5.5 },     // 5 - poisoned
+      { text: 'hook', start: 8.0, end: 8.3 },      // 6 - retake Hook 1 (kept)
+      { text: '1', start: 8.5, end: 8.8 },         // 7
+      { text: 'good', start: 10.0, end: 10.5 },    // 8 - content
+    ]
+
+    const result = detectMarkers(chunks, 15)
+    expect(result).toHaveLength(2)
+    expect(result[0].label).toBe('Hook 2')
+    expect(result[1].label).toBe('Hook 1')
+    // Hook 2: no non-poisoned content → extends to next marker start (8.0)
+    expect(result[0].endTime).toBe(8.0)
+    // Hook 1 retake: content "good" at 10.0–10.5, gap to 15 > 0.5 → 0.1 buffer
+    expect(result[1].endTime).toBe(10.6)
+  })
+})
+
+describe('detectMarkers — minimum clip duration filter', () => {
+  it('markers producing clips < 0.5s are filtered out, survivors recomputed', () => {
+    // Hook 4 and Hook 5 are hallucinated rapid-fire markers with no content between them
+    const chunks: WhisperChunk[] = [
+      { text: 'hook', start: 0, end: 0.3 },      // 0
+      { text: '1', start: 0.3, end: 0.5 },        // 1
+      { text: 'hello', start: 0.6, end: 1.0 },    // 2 — content for Hook 1
+      { text: 'hook', start: 1.1, end: 1.3 },     // 3
+      { text: '4', start: 1.3, end: 1.5 },        // 4 — hallucinated marker
+      { text: 'hook', start: 1.5, end: 1.7 },     // 5
+      { text: '5', start: 1.7, end: 1.9 },        // 6 — hallucinated marker
+      { text: 'hook', start: 2.0, end: 2.3 },     // 7
+      { text: '2', start: 2.3, end: 2.5 },        // 8
+      { text: 'world', start: 3.0, end: 3.5 },    // 9 — content for Hook 2
+    ]
+
+    const result = detectMarkers(chunks, 10)
+    // Hook 4 and Hook 5 produce 0-duration clips → filtered out
+    expect(result).toHaveLength(2)
+    expect(result[0].label).toBe('Hook 1')
+    expect(result[1].label).toBe('Hook 2')
+    // Hook 1: content "hello" at 1.0, next marker (Hook 2) at 2.0, gap=1.0>0.5 → 0.1 buffer
+    expect(result[0].endTime).toBe(1.1)
+    // Hook 2: content "world" at 3.5, videoDuration=10, gap=6.5>0.5 → 0.1 buffer
+    expect(result[1].endTime).toBe(3.6)
+  })
+
+  it('all markers with real content (>= 0.5s) pass the filter', () => {
+    const chunks: WhisperChunk[] = [
+      { text: 'hook', start: 0, end: 0.3 },
+      { text: '1', start: 0.5, end: 0.8 },
+      { text: 'words', start: 1.0, end: 2.0 },
+      { text: 'hook', start: 4.0, end: 4.3 },
+      { text: '2', start: 4.5, end: 4.8 },
+      { text: 'more', start: 5.0, end: 6.0 },
+      { text: 'meat', start: 8.0, end: 8.3 },
+      { text: '1', start: 8.5, end: 8.8 },
+      { text: 'content', start: 9.0, end: 10.0 },
+    ]
+
+    const result = detectMarkers(chunks, 15)
+    // All three markers have real content → all pass
+    expect(result).toHaveLength(3)
+    expect(result[0].label).toBe('Hook 1')
+    expect(result[1].label).toBe('Hook 2')
+    expect(result[2].label).toBe('Meat 1')
+  })
+})
