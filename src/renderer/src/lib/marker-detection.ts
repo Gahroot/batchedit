@@ -260,21 +260,44 @@ export function detectMarkers(wordChunks: WhisperChunk[], videoDuration: number)
     return aTime - bTime
   })
 
-  // Set start/end times: content starts after the marker phrase, ends at last content word + 0.5s
+  // Deduplicate retakes: if the same label appears multiple times, keep only the last
+  // occurrence (the final retake). Poison all word chunks between removed and kept markers
+  // so bad-take content won't bleed into the previous clip's end time.
+  const labelLastIndex = new Map<string, number>()
   for (let i = 0; i < markers.length; i++) {
-    const lastMarkerIdx = markers[i].markerChunkIndices[markers[i].markerChunkIndices.length - 1]
+    labelLastIndex.set(markers[i].label, i)
+  }
+  const removedIndices = new Set<number>()
+  for (let i = 0; i < markers.length; i++) {
+    const lastIdx = labelLastIndex.get(markers[i].label)!
+    if (i !== lastIdx) {
+      removedIndices.add(i)
+      // Poison all chunk indices from this marker's first chunk up to (but not including)
+      // the kept marker's first chunk — covers the marker phrase + bad-take content
+      const poisonStart = markers[i].markerChunkIndices[0]
+      const poisonEnd = markers[lastIdx].markerChunkIndices[0]
+      for (let j = poisonStart; j < poisonEnd; j++) {
+        used.add(j)
+      }
+    }
+  }
+  const dedupedMarkers = markers.filter((_, i) => !removedIndices.has(i))
+
+  // Set start/end times: content starts after the marker phrase, ends with adaptive buffer capped at next marker
+  for (let i = 0; i < dedupedMarkers.length; i++) {
+    const lastMarkerIdx = dedupedMarkers[i].markerChunkIndices[dedupedMarkers[i].markerChunkIndices.length - 1]
     const nextWordIdx = lastMarkerIdx + 1
-    markers[i].startTime = nextWordIdx < wordChunks.length
+    dedupedMarkers[i].startTime = nextWordIdx < wordChunks.length
       ? wordChunks[nextWordIdx].start
       : wordChunks[lastMarkerIdx].end
 
     // Find the boundary: either the next marker's first chunk index, or end of chunks
-    const boundaryIdx = i + 1 < markers.length
-      ? markers[i + 1].markerChunkIndices[0]
+    const boundaryIdx = i + 1 < dedupedMarkers.length
+      ? dedupedMarkers[i + 1].markerChunkIndices[0]
       : wordChunks.length
 
     // Find last non-marker content word before the boundary
-    let lastContentEnd = markers[i].startTime
+    let lastContentEnd = dedupedMarkers[i].startTime
     for (let j = boundaryIdx - 1; j >= nextWordIdx; j--) {
       if (!used.has(j)) {
         lastContentEnd = wordChunks[j].end
@@ -282,8 +305,18 @@ export function detectMarkers(wordChunks: WhisperChunk[], videoDuration: number)
       }
     }
 
-    markers[i].endTime = Math.min(lastContentEnd + 0.5, videoDuration)
+    // Hard cap: next marker's first word start, or videoDuration for last clip
+    const nextMarkerStart = i + 1 < dedupedMarkers.length
+      ? wordChunks[dedupedMarkers[i + 1].markerChunkIndices[0]].start
+      : videoDuration
+
+    // Adaptive buffer: large silence gap (>0.5s) → content clearly ended → 0.1s
+    // Smaller gap → 0.2s to protect trailing speech
+    const silenceGap = nextMarkerStart - lastContentEnd
+    const buffer = silenceGap > 0.5 ? 0.1 : 0.2
+
+    dedupedMarkers[i].endTime = Math.min(lastContentEnd + buffer, nextMarkerStart, videoDuration)
   }
 
-  return markers
+  return dedupedMarkers
 }

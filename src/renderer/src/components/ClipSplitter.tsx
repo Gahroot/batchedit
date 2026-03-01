@@ -448,12 +448,12 @@ export function ClipSplitter() {
               ref={videoRef}
               src={`file://${videoPath}`}
               controls
-              className="w-full max-h-48 rounded-md bg-black object-contain"
+              className="w-full max-h-48 rounded-md bg-black object-contain flex-shrink-0"
             />
 
             {/* Segment Timeline */}
             {markers.length > 0 && (
-              <div className="flex h-6 rounded-md overflow-hidden gap-px">
+              <div className="flex h-6 rounded-md overflow-hidden gap-px flex-shrink-0">
                 {markers.map((m) => {
                   const width = videoDuration > 0
                     ? ((m.endTime - m.startTime) / videoDuration) * 100
@@ -476,6 +476,8 @@ export function ClipSplitter() {
               </div>
             )}
 
+            {/* Scrollable content: segments + transcript + actions */}
+            <div className="flex-1 min-h-0 overflow-y-auto space-y-3">
             {/* Markers List Header */}
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium">
@@ -512,8 +514,7 @@ export function ClipSplitter() {
               </div>
             )}
 
-            <ScrollArea className="max-h-60 min-h-0">
-              <div className="space-y-1.5 pr-3">
+              <div className="space-y-1.5">
                 {markers.map((m) => (
                   <div key={m.id} className="flex items-center gap-1.5 text-xs">
                     {/* Bucket select */}
@@ -628,7 +629,6 @@ export function ClipSplitter() {
                   </div>
                 ))}
               </div>
-            </ScrollArea>
 
             {/* Transcript */}
             {wordChunks.length > 0 && (
@@ -728,6 +728,7 @@ export function ClipSplitter() {
                 <ArrowRight className="w-4 h-4" />
                 Push to Buckets
               </Button>
+            </div>
             </div>
           </div>
         )}

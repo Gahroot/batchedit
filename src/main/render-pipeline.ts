@@ -332,9 +332,13 @@ export function setupRenderPipeline(): void {
       mkdirSync(dir, { recursive: true })
 
       const results: Array<{ label: string; bucket: string; outputPath: string }> = []
+      const nameCount = new Map<string, number>()
       for (const seg of segments) {
         const safeName = seg.label.replace(/[<>:"/\\|?*]+/g, '_').replace(/\s+/g, '_')
-        const outputPath = join(dir, `${safeName}.mp4`)
+        const count = (nameCount.get(safeName) || 0) + 1
+        nameCount.set(safeName, count)
+        const fileName = count > 1 ? `${safeName}_${count}` : safeName
+        const outputPath = join(dir, `${fileName}.mp4`)
         await trimVideo(videoPath, outputPath, seg.startTime, seg.endTime)
         results.push({ label: seg.label, bucket: seg.bucket, outputPath })
       }
