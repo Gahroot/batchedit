@@ -40,6 +40,10 @@ const api = {
     outputDir: string | null
   ) => ipcRenderer.invoke('ffmpeg:splitVideo', videoPath, segments, outputDir),
 
+  // Re-encoding trim (frame-accurate)
+  trimVideoReencode: (videoPath: string, outputDir: string | null, startTime: number, endTime: number) =>
+    ipcRenderer.invoke('ffmpeg:trimVideoReencode', videoPath, outputDir, startTime, endTime),
+
   // Silence trimming
   detectLeadingSilence: (videoPath: string) =>
     ipcRenderer.invoke('ffmpeg:detectLeadingSilence', videoPath),

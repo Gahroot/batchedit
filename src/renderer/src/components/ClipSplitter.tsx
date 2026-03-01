@@ -3,23 +3,25 @@ import {
   Scissors,
   Upload,
   Loader2,
-  Plus,
   Trash2,
   Play,
   FolderOpen,
   ArrowRight,
   CheckCircle,
-  Bug
+  Bug,
+  MapPin,
+  X
 } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import { useWhisper, WhisperChunk } from '@/hooks/useWhisper'
 import { detectMarkers, DetectedMarker } from '@/lib/marker-detection'
-import { useStore, BucketType } from '../store'
+import { useStore, BucketType, Clip, WordChunk } from '../store'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Progress } from '@/components/ui/progress'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Badge } from '@/components/ui/badge'
 import {
   Dialog,
   DialogContent,
@@ -61,6 +63,63 @@ function formatTime(seconds: number): string {
   return `${String(m).padStart(2, '0')}:${s.toFixed(1).padStart(4, '0')}`
 }
 
+function parseTimeInput(value: string): number | null {
+  // Accept MM:SS.s or just seconds
+  const mmss = value.match(/^(\d+):(\d+(?:\.\d+)?)$/)
+  if (mmss) return parseInt(mmss[1]) * 60 + parseFloat(mmss[2])
+  const secs = parseFloat(value)
+  return isNaN(secs) ? null : secs
+}
+
+function EditableTime({
+  value,
+  onChange,
+  min,
+  max
+}: {
+  value: number
+  onChange: (v: number) => void
+  min: number
+  max: number
+}) {
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState('')
+
+  if (!editing) {
+    return (
+      <button
+        className="font-mono text-muted-foreground hover:text-foreground hover:underline cursor-text"
+        onClick={() => {
+          setText(formatTime(value))
+          setEditing(true)
+        }}
+      >
+        {formatTime(value)}
+      </button>
+    )
+  }
+
+  return (
+    <input
+      autoFocus
+      className="font-mono w-16 text-xs bg-transparent border-b border-primary outline-none text-center"
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={() => {
+        const parsed = parseTimeInput(text)
+        if (parsed !== null) {
+          onChange(Math.max(min, Math.min(max, parsed)))
+        }
+        setEditing(false)
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+        if (e.key === 'Escape') setEditing(false)
+      }}
+    />
+  )
+}
+
 export function ClipSplitter() {
   const [open, setOpen] = useState(false)
   const [step, setStep] = useState<Step>('upload')
@@ -72,6 +131,7 @@ export function ClipSplitter() {
   const [error, setError] = useState<string | null>(null)
   const [splitProgress, setSplitProgress] = useState(0)
   const [showRawChunks, setShowRawChunks] = useState(false)
+  const [markInTime, setMarkInTime] = useState<number | null>(null)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const dropRef = useRef<HTMLDivElement>(null)
@@ -91,6 +151,7 @@ export function ClipSplitter() {
       setError(null)
       setSplitProgress(0)
       setShowRawChunks(false)
+      setMarkInTime(null)
     }
   }, [open])
 
@@ -156,44 +217,54 @@ export function ClipSplitter() {
   }, [])
 
   const removeMarker = useCallback((id: string) => {
-    setMarkers((prev) => {
-      const filtered = prev.filter((m) => m.id !== id)
-      // Recalculate end times
-      for (let i = 0; i < filtered.length; i++) {
-        if (i + 1 < filtered.length) {
-          filtered[i].endTime = filtered[i + 1].startTime
-        } else {
-          filtered[i].endTime = videoDuration
-        }
-      }
-      return filtered
-    })
-  }, [videoDuration])
+    setMarkers((prev) => prev.filter((m) => m.id !== id))
+  }, [])
 
-  const addMarker = useCallback(() => {
+  const handleMarkIn = useCallback(() => {
     const currentTime = videoRef.current?.currentTime || 0
+    setMarkInTime(currentTime)
+  }, [])
+
+  const handleMarkOut = useCallback(() => {
+    const outTime = videoRef.current?.currentTime || 0
+    if (markInTime === null) return
+
+    const startTime = Math.min(markInTime, outTime)
+    const endTime = Math.max(markInTime, outTime)
+
     const newMarker: DetectedMarker = {
       id: `marker-${uuidv4()}`,
       label: `Clip ${markers.length + 1}`,
       bucket: 'hook',
-      startTime: currentTime,
-      endTime: videoDuration,
+      startTime,
+      endTime,
       markerChunkIndices: []
     }
 
-    setMarkers((prev) => {
-      const updated = [...prev, newMarker].sort((a, b) => a.startTime - b.startTime)
-      // Recalculate end times
-      for (let i = 0; i < updated.length; i++) {
-        if (i + 1 < updated.length) {
-          updated[i].endTime = updated[i + 1].startTime
-        } else {
-          updated[i].endTime = videoDuration
-        }
-      }
-      return updated
-    })
-  }, [markers.length, videoDuration])
+    setMarkers((prev) =>
+      [...prev, newMarker].sort((a, b) => a.startTime - b.startTime)
+    )
+    setMarkInTime(null)
+  }, [markInTime, markers.length])
+
+  const cancelMarkIn = useCallback(() => {
+    setMarkInTime(null)
+  }, [])
+
+  /** Subset wordChunks for a marker's time range, excluding marker-word indices */
+  const getTranscriptForMarker = useCallback(
+    (m: DetectedMarker): WordChunk[] => {
+      const markerIndices = new Set(m.markerChunkIndices)
+      return wordChunks
+        .filter((w, i) => !markerIndices.has(i) && w.end > m.startTime && w.start < m.endTime)
+        .map((w) => ({
+          text: w.text,
+          start: Math.max(0, w.start - m.startTime),
+          end: Math.min(m.endTime - m.startTime, w.end - m.startTime)
+        }))
+    },
+    [wordChunks]
+  )
 
   const handleSaveToDisk = useCallback(async () => {
     if (!videoPath || markers.length === 0) return
@@ -260,25 +331,31 @@ export function ClipSplitter() {
       )
       setSplitResults(results)
 
-      // Add clips to buckets
-      const bucketClips: Record<BucketType, Array<{ id: string; path: string; name: string; duration: number; thumbnail?: string }>> = {
+      // Add clips to buckets with transcript data
+      const bucketClips: Record<BucketType, Clip[]> = {
         hook: [],
         meat: [],
         cta: []
       }
 
-      for (const result of results) {
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i]
+        const marker = markers[i]
         const meta = await window.api.getMetadata(result.outputPath)
         let thumbnail: string | undefined
         try {
           thumbnail = await window.api.getThumbnail(result.outputPath)
         } catch {}
+
+        const transcript = marker ? getTranscriptForMarker(marker) : undefined
+
         bucketClips[result.bucket as BucketType].push({
           id: uuidv4(),
           path: result.outputPath,
           name: `${result.label}.mp4`,
           duration: meta.duration,
-          thumbnail
+          thumbnail,
+          transcript
         })
       }
 
@@ -293,7 +370,7 @@ export function ClipSplitter() {
       setError(err instanceof Error ? err.message : String(err))
       setStep('review')
     }
-  }, [videoPath, markers, addClips])
+  }, [videoPath, markers, addClips, getTranscriptForMarker])
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -399,27 +476,46 @@ export function ClipSplitter() {
               </div>
             )}
 
-            {/* Markers List */}
+            {/* Markers List Header */}
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium">
                 Segments ({markers.length})
               </span>
-              <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={addMarker}>
-                <Plus className="w-3 h-3" />
-                Add
-              </Button>
+              <div className="flex items-center gap-1.5">
+                {markInTime !== null && (
+                  <Badge variant="secondary" className="text-[10px] font-mono gap-1">
+                    IN: {formatTime(markInTime)}
+                  </Badge>
+                )}
+                {markInTime === null ? (
+                  <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={handleMarkIn}>
+                    <MapPin className="w-3 h-3" />
+                    Mark IN
+                  </Button>
+                ) : (
+                  <>
+                    <Button variant="default" size="sm" className="h-7 gap-1 text-xs" onClick={handleMarkOut}>
+                      <MapPin className="w-3 h-3" />
+                      Mark OUT
+                    </Button>
+                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={cancelMarkIn}>
+                      <X className="w-3 h-3" />
+                    </Button>
+                  </>
+                )}
+              </div>
             </div>
 
             {markers.length === 0 && (
               <div className="text-center py-6 text-sm text-muted-foreground">
-                No markers detected. Add segments manually using the &quot;Add&quot; button above.
+                No markers detected. Use Mark IN / Mark OUT to add segments manually.
               </div>
             )}
 
             <ScrollArea className="max-h-60 min-h-0">
               <div className="space-y-1.5 pr-3">
                 {markers.map((m) => (
-                  <div key={m.id} className="flex items-center gap-2 text-xs">
+                  <div key={m.id} className="flex items-center gap-1.5 text-xs">
                     {/* Bucket select */}
                     <Select
                       value={m.bucket}
@@ -442,12 +538,8 @@ export function ClipSplitter() {
                       className="h-7 text-xs flex-1 min-w-0"
                     />
 
-                    {/* Time display */}
-                    <span className="font-mono text-muted-foreground whitespace-nowrap">
-                      {formatTime(m.startTime)}–{formatTime(m.endTime)}
-                    </span>
-
-                    {/* Adjust start -0.1s */}
+                    {/* Start time controls: S << time >> */}
+                    <span className="text-[10px] text-muted-foreground">S</span>
                     <Button
                       variant="ghost"
                       size="sm"
@@ -459,8 +551,12 @@ export function ClipSplitter() {
                     >
                       &laquo;
                     </Button>
-
-                    {/* Adjust start +0.1s */}
+                    <EditableTime
+                      value={m.startTime}
+                      onChange={(v) => updateMarker(m.id, { startTime: v })}
+                      min={0}
+                      max={m.endTime - 0.1}
+                    />
                     <Button
                       variant="ghost"
                       size="sm"
@@ -469,6 +565,41 @@ export function ClipSplitter() {
                       onClick={() =>
                         updateMarker(m.id, {
                           startTime: Math.min(m.endTime - 0.1, m.startTime + 0.1)
+                        })
+                      }
+                    >
+                      &raquo;
+                    </Button>
+
+                    {/* End time controls: E << time >> */}
+                    <span className="text-[10px] text-muted-foreground">E</span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 w-6 p-0 text-xs"
+                      title="End -0.1s"
+                      onClick={() =>
+                        updateMarker(m.id, {
+                          endTime: Math.max(m.startTime + 0.1, m.endTime - 0.1)
+                        })
+                      }
+                    >
+                      &laquo;
+                    </Button>
+                    <EditableTime
+                      value={m.endTime}
+                      onChange={(v) => updateMarker(m.id, { endTime: v })}
+                      min={m.startTime + 0.1}
+                      max={videoDuration}
+                    />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 w-6 p-0 text-xs"
+                      title="End +0.1s"
+                      onClick={() =>
+                        updateMarker(m.id, {
+                          endTime: Math.min(videoDuration, m.endTime + 0.1)
                         })
                       }
                     >
@@ -624,7 +755,7 @@ export function ClipSplitter() {
                 {splitResults.map((r, i) => (
                   <div key={i} className="text-xs text-muted-foreground">
                     <span className={BUCKET_COLORS_TEXT[r.bucket as BucketType]}>{r.label}</span>
-                    {' → '}
+                    {' \u2192 '}
                     {r.bucket}
                   </div>
                 ))}

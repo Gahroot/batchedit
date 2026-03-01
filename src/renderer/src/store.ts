@@ -1,12 +1,19 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 
+export interface WordChunk {
+  text: string
+  start: number
+  end: number
+}
+
 export interface Clip {
   id: string
   path: string
   name: string
   duration: number
   thumbnail?: string
+  transcript?: WordChunk[]
 }
 
 export type BucketType = 'hook' | 'meat' | 'cta'
@@ -165,6 +172,9 @@ interface AppState {
   removeClip: (bucket: BucketType, clipId: string) => void
   reorderClips: (bucket: BucketType, clips: Clip[]) => void
   setHookText: (clipId: string, text: string) => void
+  setClipTranscript: (clipId: string, transcript: WordChunk[]) => void
+  updateClipTranscriptWord: (clipId: string, wordIndex: number, newText: string) => void
+  updateClipPath: (bucket: BucketType, clipId: string, newPath: string, newDuration: number, thumbnail?: string) => void
   setResolution: (resolution: ProjectSettings['resolution']) => void
   setOutputDirectory: (dir: string) => void
   setRenderProgress: (progress: RenderProgress[]) => void
@@ -257,6 +267,38 @@ export const useStore = create<AppState>((set, get) => ({
     set((state) => ({
       hookTexts: { ...state.hookTexts, [clipId]: text }
     })),
+
+  setClipTranscript: (clipId, transcript) =>
+    set((state) => {
+      const update = (clips: Clip[]) =>
+        clips.map((c) => (c.id === clipId ? { ...c, transcript } : c))
+      return { hooks: update(state.hooks), meats: update(state.meats), ctas: update(state.ctas) }
+    }),
+
+  updateClipTranscriptWord: (clipId, wordIndex, newText) =>
+    set((state) => {
+      const update = (clips: Clip[]) =>
+        clips.map((c) => {
+          if (c.id !== clipId || !c.transcript) return c
+          const transcript = c.transcript.map((w, i) =>
+            i === wordIndex ? { ...w, text: newText } : w
+          )
+          return { ...c, transcript }
+        })
+      return { hooks: update(state.hooks), meats: update(state.meats), ctas: update(state.ctas) }
+    }),
+
+  updateClipPath: (bucket, clipId, newPath, newDuration, thumbnail) =>
+    set((state) => {
+      const key = bucket === 'hook' ? 'hooks' : bucket === 'meat' ? 'meats' : 'ctas'
+      return {
+        [key]: state[key].map((c) =>
+          c.id === clipId
+            ? { ...c, path: newPath, duration: newDuration, ...(thumbnail !== undefined && { thumbnail }) }
+            : c
+        )
+      }
+    }),
 
   setResolution: (resolution) =>
     set((state) => ({

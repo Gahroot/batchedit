@@ -1,5 +1,5 @@
 import { ipcMain, app } from 'electron'
-import { ffmpeg, getVideoMetadata, extractAudio, trimVideo, detectLeadingSilence, trimLeadingSilence } from './ffmpeg'
+import { ffmpeg, getVideoMetadata, extractAudio, trimVideo, trimVideoReencode, detectLeadingSilence, trimLeadingSilence } from './ffmpeg'
 import { join, normalize } from 'path'
 import { writeFileSync, mkdirSync, unlinkSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -357,6 +357,23 @@ export function setupRenderPipeline(): void {
       const dir = outputDir || tmpdir()
       const outPath = join(dir, `batchedit-trimmed-${uuidv4()}.mp4`)
       return trimLeadingSilence(videoPath, outPath)
+    }
+  )
+
+  // Frame-accurate re-encoding trim
+  ipcMain.handle(
+    'ffmpeg:trimVideoReencode',
+    async (
+      _event,
+      videoPath: string,
+      outputDir: string | null,
+      startTime: number,
+      endTime: number
+    ) => {
+      const dir = outputDir || tmpdir()
+      mkdirSync(dir, { recursive: true })
+      const outPath = join(dir, `batchedit-retrim-${uuidv4()}.mp4`)
+      return trimVideoReencode(videoPath, outPath, startTime, endTime)
     }
   )
 

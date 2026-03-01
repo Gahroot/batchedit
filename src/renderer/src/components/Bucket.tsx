@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, X, Type, FileVideo, Sparkles, Loader2, Image } from 'lucide-react'
+import { Plus, X, Type, FileVideo, Sparkles, Loader2, Image, Pencil } from 'lucide-react'
 import { useStore, BucketType, Clip } from '../store'
 import { useWhisper } from '../hooks/useWhisper'
 import { cn } from '../lib/utils'
@@ -20,6 +20,7 @@ import { DndContext, closestCenter, DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers'
 import { SortableClip } from './SortableClip'
+import { ClipEditor } from './ClipEditor'
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mkv', '.webm']
 
@@ -131,6 +132,7 @@ export function Bucket({ type, label, color }: BucketProps) {
   const autoTrimSilence = useStore((s) => s.autoTrimSilence)
   const [isDragOver, setIsDragOver] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [editingClipId, setEditingClipId] = useState<string | null>(null)
 
   const processClip = useCallback(async (path: string): Promise<Clip> => {
     let finalPath = path
@@ -338,6 +340,22 @@ export function Bucket({ type, label, color }: BucketProps) {
                                         variant="ghost"
                                         size="icon"
                                         className="h-6 w-6 opacity-0 group-hover:opacity-100"
+                                        onClick={() => setEditingClipId(clip.id)}
+                                        disabled={isRendering}
+                                      >
+                                        <Pencil className="w-3.5 h-3.5" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Edit clip</TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-6 w-6 opacity-0 group-hover:opacity-100"
                                         onClick={() => removeClip(type, clip.id)}
                                         disabled={isRendering}
                                       >
@@ -375,6 +393,16 @@ export function Bucket({ type, label, color }: BucketProps) {
           </div>
         </ScrollArea>
       </CardContent>
+
+      {/* Clip Editor Dialog */}
+      {editingClipId && (
+        <ClipEditor
+          open={!!editingClipId}
+          onOpenChange={(open) => { if (!open) setEditingClipId(null) }}
+          clipId={editingClipId}
+          bucket={type}
+        />
+      )}
     </Card>
   )
 }

@@ -16,7 +16,7 @@ export interface DetectedMarker {
 }
 
 /** Strip punctuation, lowercase, trim — so "Hook," → "hook", "CTA!" → "cta" */
-function normalize(word: string): string {
+export function normalize(word: string): string {
   return word.toLowerCase().replace(/[^a-z0-9]/g, '')
 }
 
@@ -91,7 +91,7 @@ function editDistance(a: string, b: string): number {
   return dp[m][n]
 }
 
-function matchBucketSingle(normalized: string): BucketType | null {
+export function matchBucketSingle(normalized: string): BucketType | null {
   if (!normalized) return null
   if (BUCKET_ALIASES[normalized]) return BUCKET_ALIASES[normalized]
   // Fuzzy: edit distance 1 for aliases with >= 3 chars
@@ -103,7 +103,7 @@ function matchBucketSingle(normalized: string): BucketType | null {
   return null
 }
 
-function parseNumber(normalized: string): number | null {
+export function parseNumber(normalized: string): number | null {
   if (!normalized) return null
   if (NUMBER_WORDS[normalized] !== undefined) return NUMBER_WORDS[normalized]
   const num = parseInt(normalized, 10)
@@ -260,7 +260,7 @@ export function detectMarkers(wordChunks: WhisperChunk[], videoDuration: number)
     return aTime - bTime
   })
 
-  // Set start/end times: content starts after the marker phrase, ends at next marker
+  // Set start/end times: content starts after the marker phrase, ends at last content word + 0.5s
   for (let i = 0; i < markers.length; i++) {
     const lastMarkerIdx = markers[i].markerChunkIndices[markers[i].markerChunkIndices.length - 1]
     const nextWordIdx = lastMarkerIdx + 1
@@ -268,12 +268,21 @@ export function detectMarkers(wordChunks: WhisperChunk[], videoDuration: number)
       ? wordChunks[nextWordIdx].start
       : wordChunks[lastMarkerIdx].end
 
-    if (i + 1 < markers.length) {
-      const nextMarkerFirstIdx = markers[i + 1].markerChunkIndices[0]
-      markers[i].endTime = wordChunks[nextMarkerFirstIdx].start
-    } else {
-      markers[i].endTime = videoDuration
+    // Find the boundary: either the next marker's first chunk index, or end of chunks
+    const boundaryIdx = i + 1 < markers.length
+      ? markers[i + 1].markerChunkIndices[0]
+      : wordChunks.length
+
+    // Find last non-marker content word before the boundary
+    let lastContentEnd = markers[i].startTime
+    for (let j = boundaryIdx - 1; j >= nextWordIdx; j--) {
+      if (!used.has(j)) {
+        lastContentEnd = wordChunks[j].end
+        break
+      }
     }
+
+    markers[i].endTime = Math.min(lastContentEnd + 0.5, videoDuration)
   }
 
   return markers

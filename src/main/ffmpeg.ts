@@ -118,6 +118,23 @@ export function trimVideo(
   })
 }
 
+export function trimVideoReencode(
+  inputPath: string,
+  outputPath: string,
+  startTime: number,
+  endTime: number
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .setStartTime(startTime)
+      .setDuration(endTime - startTime)
+      .outputOptions(['-y', '-c:v', 'libx264', '-preset', 'fast', '-c:a', 'aac'])
+      .on('end', () => resolve(outputPath))
+      .on('error', reject)
+      .save(outputPath)
+  })
+}
+
 export function parseSilenceStart(line: string): number | null {
   const match = line.match(/silence_start:\s*([\d.]+)/)
   return match ? parseFloat(match[1]) : null
