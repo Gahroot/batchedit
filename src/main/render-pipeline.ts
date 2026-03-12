@@ -1,8 +1,8 @@
 import { ipcMain, app } from 'electron'
-import { ffmpeg, getVideoMetadata, extractAudio, trimVideo, trimVideoReencode, detectLeadingSilence, trimLeadingSilence } from './ffmpeg'
+import { ffmpeg, getVideoMetadata, extractAudio, trimVideo, trimVideoReencode, detectLeadingSilence, trimLeadingSilence, getEncoder } from './ffmpeg'
 import { join, normalize } from 'path'
-import { writeFileSync, mkdirSync, unlinkSync, readFileSync } from 'fs'
-import { tmpdir } from 'os'
+import { writeFileSync, mkdirSync, unlinkSync, readFileSync, existsSync, statSync } from 'fs'
+import { tmpdir, cpus } from 'os'
 import { v4 as uuidv4 } from 'uuid'
 
 function getFontsDir(): string {
@@ -107,43 +107,254 @@ export interface RenderJob {
 export interface RenderProgress {
   jobId: string
   percent: number
-  status: 'queued' | 'rendering' | 'done' | 'error'
+  status: 'queued' | 'normalizing' | 'rendering' | 'done' | 'error'
   error?: string
 }
 
-function concatWithNormalization(
-  job: RenderJob,
+/** Check if a job needs overlays/captions/text (the "slow path") */
+function jobNeedsOverlays(job: RenderJob): boolean {
+  const hasText = !!(job.textOverlay && job.hookDurationSec)
+  const hasCaptions = !!job.captionsAssPath
+  const hasMedia = !!(job.mediaOverlays && (job.mediaOverlays.meat || job.mediaOverlays.cta))
+  return hasText || hasCaptions || hasMedia
+}
+
+/** Escape a path for use in ffconcat list files (single-quote wrapping, escape inner quotes) */
+function escapeConcatPath(p: string): string {
+  return p.replace(/\\/g, '/').replace(/'/g, "'\\''")
+}
+
+/**
+ * Disk cache for pre-normalized clips.
+ * Maps a cache key (sourcePath:mtime:WxH:autoResize) to the normalized file path.
+ * Persists across batch renders within a single app session; cleaned up on app quit.
+ */
+const normalizedClipCache = new Map<string, string>()
+
+function getNormCacheKey(
+  sourcePath: string,
+  width: number,
+  height: number,
+  autoResize: boolean
+): string {
+  const mtime = statSync(sourcePath).mtimeMs
+  return `${sourcePath}:${mtime}:${width}x${height}:${autoResize}`
+}
+
+/**
+ * Delete all cached normalized files from disk and clear the in-memory map.
+ */
+export function clearNormalizedCache(): void {
+  for (const cachedPath of normalizedClipCache.values()) {
+    try { unlinkSync(cachedPath) } catch {}
+  }
+  normalizedClipCache.clear()
+  console.log('[Normalize] Cache cleared')
+}
+
+/**
+ * Pre-normalize a single clip to match target resolution, fps=30, h264+aac.
+ * Returns the original path if it already matches, otherwise encodes to a temp file.
+ * Results are cached on disk so re-renders skip encoding for unchanged clips.
+ */
+async function preNormalizeClip(
+  clipPath: string,
+  resolution: { width: number; height: number },
+  autoResize: boolean
+): Promise<string> {
+  const { width, height } = resolution
+
+  // Check disk cache first
+  const cacheKey = getNormCacheKey(clipPath, width, height, autoResize)
+  const cached = normalizedClipCache.get(cacheKey)
+  if (cached && existsSync(cached)) {
+    console.log(`[Normalize] Cache hit: ${clipPath}`)
+    return cached
+  }
+
+  const meta = await getVideoMetadata(clipPath)
+
+  // Check if clip already matches target specs
+  const resMatch = meta.width === width && meta.height === height
+  const fpsMatch = Math.abs(meta.fps - 30) < 0.5
+  const codecMatch = meta.codec === 'h264' && meta.audioCodec === 'aac'
+
+  if (resMatch && fpsMatch && codecMatch) {
+    console.log(`[Normalize] Skip (already matches): ${clipPath}`)
+    return clipPath
+  }
+
+  const outPath = join(tmpdir(), `batchedit-norm-${uuidv4()}.mp4`)
+  const { encoder, presetFlag } = getEncoder()
+
+  const scaleFilter = autoResize
+    ? `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},fps=30,setpts=PTS-STARTPTS`
+    : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,fps=30,setpts=PTS-STARTPTS`
+
+  return new Promise<string>((resolve, reject) => {
+    ffmpeg(normalize(clipPath))
+      .videoFilters(scaleFilter)
+      .outputOptions([
+        '-y',
+        '-c:v', encoder, ...presetFlag,
+        '-c:a', 'aac', '-b:a', '128k',
+        '-movflags', '+faststart'
+      ])
+      .on('start', (cmd) => console.log(`[Normalize] ${cmd}`))
+      .on('end', () => {
+        normalizedClipCache.set(cacheKey, outPath)
+        resolve(outPath)
+      })
+      .on('error', (err, _stdout, stderr) => {
+        if (stderr) console.error(`[Normalize] stderr:\n${stderr}`)
+        reject(new Error(stderr ? `${err.message}\nFFmpeg output:\n${stderr}` : err.message))
+      })
+      .save(outPath)
+  })
+}
+
+/**
+ * Pre-normalize all unique clips in parallel.
+ * Returns a Map from original path to normalized path.
+ */
+async function preNormalizeAllClips(
+  clipPaths: string[],
+  resolution: { width: number; height: number },
+  autoResize: boolean,
+  onProgress: (completed: number, total: number) => void
+): Promise<Map<string, string>> {
+  const uniquePaths = [...new Set(clipPaths)]
+  const result = new Map<string, string>()
+  let completed = 0
+  const queue = [...uniquePaths]
+
+  async function processNext(): Promise<void> {
+    const clipPath = queue.shift()
+    if (!clipPath) return
+
+    const normalized = await preNormalizeClip(clipPath, resolution, autoResize)
+    result.set(clipPath, normalized)
+    completed++
+    onProgress(completed, uniquePaths.length)
+
+    await processNext()
+  }
+
+  const workers = Array.from(
+    { length: Math.min(getSlowConcurrency(), uniquePaths.length) },
+    () => processNext()
+  )
+  await Promise.all(workers)
+
+  return result
+}
+
+/**
+ * Fast path: concat pre-normalized clips via concat demuxer (stream copy, no encoding).
+ */
+function concatStreamCopy(
+  clipPaths: string[],
+  outputPath: string,
   onProgress: (percent: number) => void
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    // Normalize paths for Windows compatibility (mixed separators cause EINVAL)
-    const hookPath = normalize(job.hookPath)
-    const meatPath = normalize(job.meatPath)
-    const ctaPath = normalize(job.ctaPath)
+    // Write concat list file
+    const listContent = clipPaths
+      .map((p) => `file '${escapeConcatPath(p)}'`)
+      .join('\n')
+    const listPath = join(tmpdir(), `batchedit-concat-${uuidv4()}.txt`)
+    writeFileSync(listPath, listContent, 'utf-8')
+
+    ffmpeg()
+      .input(listPath)
+      .inputOptions(['-f', 'concat', '-safe', '0'])
+      .outputOptions([
+        '-y',
+        '-c', 'copy',
+        '-movflags', '+faststart'
+      ])
+      .on('start', (cmd) => console.log(`[FFmpeg concat-copy] ${cmd}`))
+      .on('progress', (progress) => onProgress(progress.percent || 0))
+      .on('end', () => {
+        try { unlinkSync(listPath) } catch {}
+        resolve()
+      })
+      .on('error', (err, _stdout, stderr) => {
+        if (stderr) console.error(`[FFmpeg concat-copy] stderr:\n${stderr}`)
+        try { unlinkSync(listPath) } catch {}
+        reject(new Error(stderr ? `${err.message}\nFFmpeg output:\n${stderr}` : err.message))
+      })
+      .save(normalize(outputPath))
+  })
+}
+
+/**
+ * Slow path: concat pre-normalized clips via stream copy, then apply overlays/captions
+ * in a single encoding pass.
+ */
+function concatWithOverlays(
+  job: RenderJob,
+  normalizedPaths: string[],
+  onProgress: (percent: number) => void
+): Promise<void> {
+  return new Promise((resolve, reject) => {
     const outputPath = normalize(job.outputPath)
 
+    // Step 1: concat via stream copy into a temp file
+    const tempConcat = join(tmpdir(), `batchedit-tempconcat-${uuidv4()}.mp4`)
+    const listContent = normalizedPaths
+      .map((p) => `file '${escapeConcatPath(p)}'`)
+      .join('\n')
+    const listPath = join(tmpdir(), `batchedit-concat-${uuidv4()}.txt`)
+    writeFileSync(listPath, listContent, 'utf-8')
+
+    const concatCmd = ffmpeg()
+      .input(listPath)
+      .inputOptions(['-f', 'concat', '-safe', '0'])
+      .outputOptions(['-y', '-c', 'copy', '-movflags', '+faststart'])
+
+    concatCmd
+      .on('start', (cmd) => console.log(`[FFmpeg concat-step] ${cmd}`))
+      .on('end', () => {
+        try { unlinkSync(listPath) } catch {}
+        // Step 2: apply overlays/captions on the concatenated file
+        applyOverlays(job, tempConcat, outputPath, onProgress)
+          .then(() => {
+            try { unlinkSync(tempConcat) } catch {}
+            resolve()
+          })
+          .catch((err) => {
+            try { unlinkSync(tempConcat) } catch {}
+            reject(err)
+          })
+      })
+      .on('error', (err, _stdout, stderr) => {
+        if (stderr) console.error(`[FFmpeg concat-step] stderr:\n${stderr}`)
+        try { unlinkSync(listPath) } catch {}
+        reject(new Error(stderr ? `${err.message}\nFFmpeg output:\n${stderr}` : err.message))
+      })
+      .save(tempConcat)
+  })
+}
+
+/**
+ * Apply overlays, text, and captions to a single concatenated input file.
+ */
+function applyOverlays(
+  job: RenderJob,
+  inputPath: string,
+  outputPath: string,
+  onProgress: (percent: number) => void
+): Promise<void> {
+  return new Promise((resolve, reject) => {
     const { width, height } = job.resolution
-
-    // Build filter graph: normalize each input then concat
-    const scaleFilter = (idx: number): string =>
-      job.autoResize
-        ? `[${idx}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,` +
-          `crop=${width}:${height},fps=30,setpts=PTS-STARTPTS[v${idx}]`
-        : `[${idx}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-          `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,fps=30,setpts=PTS-STARTPTS[v${idx}]`
-
-    const filters = [
-      scaleFilter(0),
-      scaleFilter(1),
-      scaleFilter(2),
-      `[v0][0:a][v1][1:a][v2][2:a]concat=n=3:v=1:a=1[vout][aout]`
-    ]
-
-    // Track temp ASS files to clean up after render
+    const filters: string[] = []
     const tempAssFiles: string[] = []
-    let currentLabel = '[vout]'
+    let currentLabel = '[0:v]'
+    let nextInputIdx = 1
+    const extraInputPaths: string[] = []
 
-    // Add text overlay on hook segment via ASS (drawtext not available in ffmpeg-static)
+    // Text overlay on hook segment
     if (job.textOverlay && job.hookDurationSec) {
       const assContent = generateTextOverlayAssFile(
         job.textOverlay,
@@ -160,11 +371,7 @@ function concatWithNormalization(
       currentLabel = '[vtxt]'
     }
 
-    // Media overlay images (proof images on meat/CTA segments)
-    // -loop 1 on input produces continuous frames; eof_action=repeat as safety net
-    let nextInputIdx = 3
-    const extraInputPaths: string[] = []
-
+    // Media overlay images
     if (job.mediaOverlays && (job.mediaOverlays.meat || job.mediaOverlays.cta)) {
       const overlayW = Math.round(width * 0.8 / 2) * 2
       const pos = job.mediaOverlayPosition || { x: 50, y: 75 }
@@ -192,7 +399,7 @@ function concatWithNormalization(
       }
     }
 
-    // Add ASS captions if provided (with fontsdir for bundled fonts)
+    // ASS captions
     if (job.captionsAssPath) {
       const escaped = escapeFilterPath(job.captionsAssPath)
       const fontsDir = escapeFilterPath(getFontsDir())
@@ -203,59 +410,58 @@ function concatWithNormalization(
     const finalVideoLabel = currentLabel
 
     const command = ffmpeg()
-      .input(hookPath)
-      .input(meatPath)
-      .input(ctaPath)
+      .input(inputPath)
 
-    // Add extra inputs for media overlays (eof_action=repeat on each overlay
-    // filter repeats the single image frame for the full duration)
     for (const imgPath of extraInputPaths) {
       command.input(imgPath)
     }
+
+    const { encoder, presetFlag } = getEncoder()
 
     command
       .complexFilter(filters.join(';'))
       .outputOptions([
         '-y',
-        '-map',
-        finalVideoLabel,
-        '-map',
-        '[aout]',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'fast',
-        '-crf',
-        '23',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '128k',
-        '-movflags',
-        '+faststart'
+        '-map', finalVideoLabel,
+        '-map', '0:a',
+        '-c:v', encoder, ...presetFlag,
+        '-c:a', 'aac', '-b:a', '128k',
+        '-movflags', '+faststart'
       ])
-      .on('start', (commandLine) => {
-        console.log(`[FFmpeg] ${commandLine}`)
-      })
-      .on('progress', (progress) => {
-        onProgress(progress.percent || 0)
-      })
+      .on('start', (cmd) => console.log(`[FFmpeg overlay] ${cmd}`))
+      .on('progress', (progress) => onProgress(progress.percent || 0))
       .on('end', () => {
         tempAssFiles.forEach((f) => { try { unlinkSync(f) } catch {} })
         resolve()
       })
       .on('error', (err, _stdout, stderr) => {
-        if (stderr) console.error(`[FFmpeg] stderr:\n${stderr}`)
+        if (stderr) console.error(`[FFmpeg overlay] stderr:\n${stderr}`)
         tempAssFiles.forEach((f) => { try { unlinkSync(f) } catch {} })
         reject(new Error(stderr ? `${err.message}\nFFmpeg output:\n${stderr}` : err.message))
       })
-
-    command.save(outputPath)
+      .save(outputPath)
   })
 }
 
-// Maximum concurrent renders (leave some CPU for the UI)
-const MAX_CONCURRENT = Math.max(1, Math.floor(require('os').cpus().length / 2))
+// Adaptive concurrency based on encoding method
+const CPU_COUNT = cpus().length
+
+/** Fast-path jobs (stream copy) are I/O bound — run up to full CPU count */
+const FAST_CONCURRENCY = Math.max(1, CPU_COUNT)
+
+/**
+ * Slow-path concurrency depends on the active encoder.
+ * GPU encoders (nvenc/qsv/vaapi) offload work to hardware, so we can
+ * run more concurrent jobs. CPU encoding (libx264) is already heavy.
+ */
+function getSlowConcurrency(): number {
+  const { encoder } = getEncoder()
+  if (encoder === 'h264_nvenc' || encoder === 'h264_qsv' || encoder === 'h264_vaapi') {
+    return Math.max(2, Math.floor(CPU_COUNT * 0.75))
+  }
+  // libx264 — conservative
+  return Math.max(1, Math.floor(CPU_COUNT / 2))
+}
 
 export function setupRenderPipeline(): void {
   // Get video metadata
@@ -423,42 +629,119 @@ export function setupRenderPipeline(): void {
         mkdirSync(outDir, { recursive: true })
       }
 
-      // Process in batches
-      let completed = 0
-      const queue = [...jobs]
+      // --- Phase 1: Pre-normalize all unique clips ---
+      // Mark all jobs as normalizing
+      for (const r of results) r.status = 'normalizing'
+      event.sender.send('render:progress', results)
 
-      async function processNext(): Promise<void> {
-        const job = queue.shift()
-        if (!job) return
+      // Collect all unique clip paths and determine autoResize from first job
+      const allClipPaths: string[] = []
+      for (const job of jobs) {
+        allClipPaths.push(job.hookPath, job.meatPath, job.ctaPath)
+      }
+      const resolution = jobs[0].resolution
+      const autoResize = jobs[0].autoResize || false
 
+      let normalizedMap: Map<string, string>
+      try {
+        normalizedMap = await preNormalizeAllClips(
+          allClipPaths,
+          resolution,
+          autoResize,
+          (completed, total) => {
+            const pct = Math.round((completed / total) * 100)
+            for (const r of results) {
+              if (r.status === 'normalizing') r.percent = pct
+            }
+            event.sender.send('render:progress', results)
+          }
+        )
+      } catch (err: any) {
+        // If normalization fails, fail all jobs
+        for (const r of results) {
+          r.status = 'error'
+          r.error = `Normalization failed: ${err.message}`
+        }
+        event.sender.send('render:progress', results)
+        return results
+      }
+
+      // Reset progress for rendering phase
+      for (const r of results) {
+        r.status = 'queued'
+        r.percent = 0
+      }
+      event.sender.send('render:progress', results)
+
+      // --- Phase 2: Render each combination ---
+      // Split into fast (stream copy, I/O bound) and slow (encoding) queues
+      const fastQueue = jobs.filter((j) => !jobNeedsOverlays(j))
+      const slowQueue = jobs.filter((j) => jobNeedsOverlays(j))
+
+      async function renderJob(job: RenderJob): Promise<void> {
         const idx = jobs.findIndex((j) => j.id === job.id)
         results[idx].status = 'rendering'
         event.sender.send('render:progress', results)
 
         try {
-          await concatWithNormalization(job, (percent) => {
-            results[idx].percent = percent
-            event.sender.send('render:progress', results)
-          })
+          const normHook = normalizedMap.get(job.hookPath) || job.hookPath
+          const normMeat = normalizedMap.get(job.meatPath) || job.meatPath
+          const normCta = normalizedMap.get(job.ctaPath) || job.ctaPath
+          const normalizedPaths = [normHook, normMeat, normCta]
+
+          if (jobNeedsOverlays(job)) {
+            await concatWithOverlays(job, normalizedPaths, (percent) => {
+              results[idx].percent = percent
+              event.sender.send('render:progress', results)
+            })
+          } else {
+            await concatStreamCopy(normalizedPaths, job.outputPath, (percent) => {
+              results[idx].percent = percent
+              event.sender.send('render:progress', results)
+            })
+          }
+
           results[idx].status = 'done'
           results[idx].percent = 100
-          completed++
         } catch (err: any) {
           results[idx].status = 'error'
           results[idx].error = err.message
-          completed++
         }
 
         event.sender.send('render:progress', results)
-        await processNext()
       }
 
-      // Start N concurrent workers
-      const workers = Array.from(
-        { length: Math.min(MAX_CONCURRENT, jobs.length) },
-        () => processNext()
-      )
-      await Promise.all(workers)
+      // Process fast jobs first (I/O bound — higher concurrency)
+      if (fastQueue.length > 0) {
+        const fastJobQueue = [...fastQueue]
+        async function processFast(): Promise<void> {
+          const job = fastJobQueue.shift()
+          if (!job) return
+          await renderJob(job)
+          await processFast()
+        }
+        const fastWorkers = Array.from(
+          { length: Math.min(FAST_CONCURRENCY, fastQueue.length) },
+          () => processFast()
+        )
+        await Promise.all(fastWorkers)
+      }
+
+      // Then process slow jobs (encoding — adaptive concurrency)
+      if (slowQueue.length > 0) {
+        const slowJobQueue = [...slowQueue]
+        async function processSlow(): Promise<void> {
+          const job = slowJobQueue.shift()
+          if (!job) return
+          await renderJob(job)
+          await processSlow()
+        }
+        const slowWorkers = Array.from(
+          { length: Math.min(getSlowConcurrency(), slowQueue.length) },
+          () => processSlow()
+        )
+        await Promise.all(slowWorkers)
+      }
 
       return results
     }

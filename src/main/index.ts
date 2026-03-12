@@ -2,7 +2,7 @@ import { app, shell, BrowserWindow, ipcMain, dialog, clipboard } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupFFmpeg } from './ffmpeg'
-import { setupRenderPipeline } from './render-pipeline'
+import { setupRenderPipeline, clearNormalizedCache } from './render-pipeline'
 
 // Show copyable error dialog for uncaught exceptions
 process.on('uncaughtException', (error) => {
@@ -162,6 +162,10 @@ Transcript: "${transcript}"`
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+})
+
+app.on('will-quit', () => {
+  clearNormalizedCache()
 })
 
 app.on('window-all-closed', () => {

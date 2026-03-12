@@ -3,13 +3,23 @@
 
 class PipelineFactory {
   static instance: any = null
+  static currentModel: string | null = null
 
-  static async getInstance(progressCallback?: (progress: any) => void) {
+  static async getInstance(model?: string, progressCallback?: (progress: any) => void) {
+    const targetModel = model || 'onnx-community/whisper-base.en_timestamped'
+
+    // Invalidate if model changed
+    if (this.instance && this.currentModel !== targetModel) {
+      try { await this.instance.dispose?.() } catch {}
+      this.instance = null
+      this.currentModel = null
+    }
+
     if (!this.instance) {
       const { pipeline } = await import('@huggingface/transformers')
       this.instance = await pipeline(
         'automatic-speech-recognition',
-        'onnx-community/whisper-tiny.en_timestamped',
+        targetModel,
         {
           dtype: {
             encoder_model: 'fp32',
@@ -19,6 +29,7 @@ class PipelineFactory {
           progress_callback: progressCallback
         }
       )
+      this.currentModel = targetModel
     }
     return this.instance
   }
@@ -31,7 +42,7 @@ self.onmessage = async (e: MessageEvent) => {
     case 'load': {
       self.postMessage({ type: 'status', status: 'loading' })
       try {
-        await PipelineFactory.getInstance((progress) => {
+        await PipelineFactory.getInstance(data?.model, (progress) => {
           self.postMessage({ type: 'progress', progress })
         })
         self.postMessage({ type: 'status', status: 'ready' })
@@ -43,7 +54,7 @@ self.onmessage = async (e: MessageEvent) => {
     case 'transcribe': {
       self.postMessage({ type: 'status', status: 'transcribing' })
       try {
-        const transcriber = await PipelineFactory.getInstance()
+        const transcriber = await PipelineFactory.getInstance(data?.model)
         const audio = data.audio as Float32Array
         const SAMPLE_RATE = 16000
         const MAX_WORD_SEC = 2.0

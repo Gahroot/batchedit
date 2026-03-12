@@ -15,7 +15,7 @@ interface Clip {
 interface RenderProgress {
   jobId: string
   percent: number
-  status: 'queued' | 'rendering' | 'done' | 'error'
+  status: 'queued' | 'normalizing' | 'rendering' | 'done' | 'error'
   error?: string
 }
 

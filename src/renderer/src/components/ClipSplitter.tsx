@@ -138,6 +138,7 @@ export function ClipSplitter() {
 
   const { loadModel, transcribe, isModelLoading, isModelReady, loadProgress } = useWhisper()
   const addClips = useStore((s) => s.addClips)
+  const whisperModel = useStore((s) => s.whisperModel)
 
   // Reset state when dialog closes
   useEffect(() => {
@@ -170,12 +171,12 @@ export function ClipSplitter() {
   const runTranscription = async (path: string, duration: number) => {
     try {
       if (!isModelReady) {
-        await loadModel()
+        await loadModel(whisperModel)
       }
       const wavPath = await window.api.extractAudio(path)
       const audioBuffer = await window.api.readAudioBuffer(wavPath)
       const audioData = new Float32Array(audioBuffer)
-      const chunks = await transcribe(audioData)
+      const chunks = await transcribe(audioData, whisperModel)
       setWordChunks(chunks)
 
       const detected = detectMarkers(chunks, duration)

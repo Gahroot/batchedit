@@ -2,6 +2,7 @@ import ffmpeg from 'fluent-ffmpeg'
 import { app } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
+import { execSync } from 'child_process'
 
 function resolveBinaryPath(name: string): string | null {
   const ext = process.platform === 'win32' ? '.exe' : ''
@@ -42,6 +43,7 @@ function resolveBinaryPath(name: string): string | null {
 }
 
 let ffmpegReady = false
+let resolvedFfmpegPath: string | null = null
 
 export function setupFFmpeg(): void {
   const ffmpegBin = resolveBinaryPath('ffmpeg')
@@ -49,12 +51,69 @@ export function setupFFmpeg(): void {
 
   if (ffmpegBin) {
     ffmpeg.setFfmpegPath(ffmpegBin)
+    resolvedFfmpegPath = ffmpegBin
   }
   if (ffprobeBin) {
     ffmpeg.setFfprobePath(ffprobeBin)
   }
 
   ffmpegReady = !!(ffmpegBin && ffprobeBin)
+
+  // Probe available hardware encoders at startup
+  detectHardwareEncoder()
+}
+
+// --- Hardware encoder detection ---
+
+export interface EncoderConfig {
+  encoder: string
+  presetFlag: string[]
+}
+
+const hwEncoderPriority = ['h264_nvenc', 'h264_vaapi', 'h264_qsv'] as const
+type HwEncoder = (typeof hwEncoderPriority)[number] | 'libx264'
+
+let cachedEncoder: HwEncoder | null = null
+
+function detectHardwareEncoder(): HwEncoder {
+  if (cachedEncoder !== null) return cachedEncoder
+
+  const bin = resolvedFfmpegPath ?? 'ffmpeg'
+  try {
+    const output = execSync(`"${bin}" -encoders -hide_banner`, {
+      encoding: 'utf-8',
+      timeout: 10_000,
+      stdio: ['pipe', 'pipe', 'pipe']
+    })
+    for (const enc of hwEncoderPriority) {
+      if (output.includes(enc)) {
+        cachedEncoder = enc
+        console.log(`[FFmpeg] Hardware encoder detected: ${enc}`)
+        return enc
+      }
+    }
+  } catch {
+    // If detection fails, fall back to software
+  }
+
+  cachedEncoder = 'libx264'
+  console.log('[FFmpeg] No hardware encoder found, using libx264')
+  return cachedEncoder
+}
+
+export function getEncoder(): EncoderConfig {
+  const encoder = cachedEncoder ?? detectHardwareEncoder()
+
+  switch (encoder) {
+    case 'h264_nvenc':
+      return { encoder, presetFlag: ['-preset', 'p4', '-rc', 'vbr', '-cq', '23'] }
+    case 'h264_vaapi':
+      return { encoder, presetFlag: ['-rc_mode', 'CQP', '-qp', '23'] }
+    case 'h264_qsv':
+      return { encoder, presetFlag: ['-preset', 'fast', '-global_quality', '23'] }
+    default:
+      return { encoder: 'libx264', presetFlag: ['-preset', 'veryfast', '-crf', '23'] }
+  }
 }
 
 export function isFFmpegAvailable(): boolean {
@@ -63,17 +122,33 @@ export function isFFmpegAvailable(): boolean {
 
 export function getVideoMetadata(
   filePath: string
-): Promise<{ duration: number; width: number; height: number; codec: string }> {
+): Promise<{ duration: number; width: number; height: number; codec: string; fps: number; audioCodec: string }> {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(filePath, (err, metadata) => {
       if (err) return reject(err)
       const video = metadata.streams.find((s) => s.codec_type === 'video')
       if (!video) return reject(new Error('No video stream found'))
+      const audio = metadata.streams.find((s) => s.codec_type === 'audio')
+      // Parse r_frame_rate (e.g. "30/1", "30000/1001")
+      let fps = 0
+      const rateStr = (video as any).r_frame_rate || (video as any).avg_frame_rate || ''
+      if (rateStr) {
+        const parts = rateStr.split('/')
+        if (parts.length === 2) {
+          const num = parseFloat(parts[0])
+          const den = parseFloat(parts[1])
+          if (den > 0) fps = num / den
+        } else {
+          fps = parseFloat(rateStr) || 0
+        }
+      }
       resolve({
         duration: metadata.format.duration || 0,
         width: video.width || 0,
         height: video.height || 0,
-        codec: video.codec_name || 'unknown'
+        codec: video.codec_name || 'unknown',
+        fps,
+        audioCodec: audio?.codec_name || 'unknown'
       })
     })
   })
@@ -106,10 +181,11 @@ export function trimVideo(
       .on('end', () => resolve(outputPath))
       .on('error', () => {
         // Fallback: re-encode if stream copy fails
+        const { encoder, presetFlag } = getEncoder()
         ffmpeg(inputPath)
           .setStartTime(startTime)
           .setDuration(endTime - startTime)
-          .outputOptions(['-y', '-c:v', 'libx264', '-preset', 'fast', '-c:a', 'aac'])
+          .outputOptions(['-y', '-c:v', encoder, ...presetFlag, '-c:a', 'aac'])
           .on('end', () => resolve(outputPath))
           .on('error', reject)
           .save(outputPath)
@@ -124,11 +200,12 @@ export function trimVideoReencode(
   startTime: number,
   endTime: number
 ): Promise<string> {
+  const { encoder, presetFlag } = getEncoder()
   return new Promise((resolve, reject) => {
     ffmpeg(inputPath)
       .setStartTime(startTime)
       .setDuration(endTime - startTime)
-      .outputOptions(['-y', '-c:v', 'libx264', '-preset', 'fast', '-c:a', 'aac'])
+      .outputOptions(['-y', '-c:v', encoder, ...presetFlag, '-c:a', 'aac'])
       .on('end', () => resolve(outputPath))
       .on('error', reject)
       .save(outputPath)

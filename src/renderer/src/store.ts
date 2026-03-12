@@ -26,7 +26,7 @@ export interface ProjectSettings {
 export interface RenderProgress {
   jobId: string
   percent: number
-  status: 'queued' | 'rendering' | 'done' | 'error'
+  status: 'queued' | 'normalizing' | 'rendering' | 'done' | 'error'
   error?: string
 }
 
@@ -158,6 +158,10 @@ interface AppState {
   mediaOverlays: { meat: string | null; cta: string | null }
   setMediaOverlay: (bucket: 'meat' | 'cta', path: string | null) => void
 
+  // Whisper model
+  whisperModel: string
+  setWhisperModel: (model: string) => void
+
   // Auto trim silence
   autoTrimSilence: boolean
   setAutoTrimSilence: (enabled: boolean) => void
@@ -213,6 +217,11 @@ export const useStore = create<AppState>((set, get) => ({
     media: { x: 50, y: 75 }
   },
   mediaOverlays: { meat: null, cta: null },
+  whisperModel: localStorage.getItem('batchedit-whisper-model') || 'onnx-community/whisper-base.en_timestamped',
+  setWhisperModel: (model) => {
+    localStorage.setItem('batchedit-whisper-model', model)
+    set({ whisperModel: model })
+  },
   autoTrimSilence: false,
   setAutoTrimSilence: (enabled) => set({ autoTrimSilence: enabled }),
 

@@ -12,6 +12,7 @@ export function useWhisper() {
   const [isModelReady, setIsModelReady] = useState(false)
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [loadProgress, setLoadProgress] = useState(0)
+  const loadedModelRef = useRef<string | null>(null)
 
   useEffect(() => {
     workerRef.current = new Worker(
@@ -23,13 +24,17 @@ export function useWhisper() {
     }
   }, [])
 
-  const loadModel = useCallback(() => {
+  const loadModel = useCallback((model?: string) => {
     return new Promise<void>((resolve, reject) => {
       const worker = workerRef.current
       if (!worker) return reject(new Error('Worker not initialized'))
-      if (isModelReady) return resolve()
+
+      // If already loaded with the same model, skip
+      if (isModelReady && model && loadedModelRef.current === model) return resolve()
 
       setIsModelLoading(true)
+      setIsModelReady(false)
+      setLoadProgress(0)
       const handler = (e: MessageEvent) => {
         const msg = e.data
         if (msg.type === 'progress' && msg.progress?.progress != null) {
@@ -40,6 +45,7 @@ export function useWhisper() {
             setIsModelLoading(false)
             setIsModelReady(true)
             setLoadProgress(100)
+            loadedModelRef.current = model || null
             worker.removeEventListener('message', handler)
             resolve()
           } else if (msg.status === 'error') {
@@ -50,11 +56,11 @@ export function useWhisper() {
         }
       }
       worker.addEventListener('message', handler)
-      worker.postMessage({ type: 'load' })
+      worker.postMessage({ type: 'load', data: { model } })
     })
   }, [isModelReady])
 
-  const transcribe = useCallback((audioData: Float32Array): Promise<WhisperChunk[]> => {
+  const transcribe = useCallback((audioData: Float32Array, model?: string): Promise<WhisperChunk[]> => {
     return new Promise((resolve, reject) => {
       const worker = workerRef.current
       if (!worker) return reject(new Error('Worker not initialized'))
@@ -73,7 +79,7 @@ export function useWhisper() {
         }
       }
       worker.addEventListener('message', handler)
-      worker.postMessage({ type: 'transcribe', data: { audio: audioData } })
+      worker.postMessage({ type: 'transcribe', data: { audio: audioData, model } })
     })
   }, [])
 

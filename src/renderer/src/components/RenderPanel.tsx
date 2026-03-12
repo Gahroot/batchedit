@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, Loader2, CheckCircle, AlertCircle, Captions, Crop, Scissors } from 'lucide-react'
+import { Play, Loader2, CheckCircle, AlertCircle, Captions, Crop, Scissors, Brain } from 'lucide-react'
 import { useStore, RenderProgress } from '../store'
 import { useWhisper } from '@/hooks/useWhisper'
 import { WhisperStatus } from './WhisperStatus'
@@ -41,6 +41,8 @@ export function RenderPanel() {
   const mediaOverlays = useStore((s) => s.mediaOverlays)
   const autoTrimSilence = useStore((s) => s.autoTrimSilence)
   const setAutoTrimSilence = useStore((s) => s.setAutoTrimSilence)
+  const whisperModel = useStore((s) => s.whisperModel)
+  const setWhisperModel = useStore((s) => s.setWhisperModel)
 
   const { loadModel, transcribe, isModelLoading, isModelReady, isTranscribing, loadProgress } =
     useWhisper()
@@ -85,7 +87,7 @@ export function RenderPanel() {
             completedClips: 0,
             totalClips: 0
           })
-          await loadModel()
+          await loadModel(whisperModel)
           modelLoaded = true
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
@@ -119,7 +121,7 @@ export function RenderPanel() {
             const wavPath = await window.api.extractAudio(clipPath)
             const audioBuffer = await window.api.readAudioBuffer(wavPath)
             const audioData = new Float32Array(audioBuffer)
-            const chunks = await transcribe(audioData)
+            const chunks = await transcribe(audioData, whisperModel)
             transcriptionCache[clipPath] = chunks
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
@@ -297,7 +299,7 @@ export function RenderPanel() {
                       <CheckCircle className="w-3 h-3 text-green-500 shrink-0" />
                     ) : rp.status === 'error' ? (
                       <AlertCircle className="w-3 h-3 text-destructive shrink-0" />
-                    ) : rp.status === 'rendering' ? (
+                    ) : rp.status === 'rendering' || rp.status === 'normalizing' ? (
                       <Loader2 className="w-3 h-3 animate-spin text-primary shrink-0" />
                     ) : (
                       <div className="w-3 h-3 rounded-full border border-border shrink-0" />
@@ -312,7 +314,7 @@ export function RenderPanel() {
                       />
                     </div>
                     <span className="font-mono text-muted-foreground w-10 text-right">
-                      {rp.status === 'error' ? 'ERR' : `${Math.round(rp.percent)}%`}
+                      {rp.status === 'error' ? 'ERR' : rp.status === 'normalizing' ? 'NORM' : `${Math.round(rp.percent)}%`}
                     </span>
                   </div>
                 )
@@ -389,9 +391,28 @@ export function RenderPanel() {
             <span className="text-muted-foreground">Auto Captions</span>
           </label>
 
-          {/* Caption Style Picker (visible when auto captions enabled) */}
+          {/* Caption Style Picker + Model Picker (visible when auto captions enabled) */}
           {autoCaptions && (
-            <CaptionStylePicker disabled={isRendering} />
+            <>
+              <CaptionStylePicker disabled={isRendering} />
+              <div className="flex items-center gap-1">
+                <Brain className="w-3.5 h-3.5 text-muted-foreground" />
+                <Select
+                  value={whisperModel}
+                  onValueChange={setWhisperModel}
+                  disabled={isRendering}
+                >
+                  <SelectTrigger className="h-7 w-auto text-xs gap-1 px-2">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="onnx-community/whisper-tiny.en_timestamped">Tiny (fast)</SelectItem>
+                    <SelectItem value="onnx-community/whisper-base.en_timestamped">Base (balanced)</SelectItem>
+                    <SelectItem value="onnx-community/whisper-small.en_timestamped">Small (accurate)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </>
           )}
 
           {/* Trim Silence Toggle */}
