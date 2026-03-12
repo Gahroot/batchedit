@@ -3,7 +3,8 @@ import { useStore } from './store'
 import { Bucket } from './components/Bucket'
 import { RenderPanel } from './components/RenderPanel'
 import { SettingsBar } from './components/SettingsBar'
-import { Film } from 'lucide-react'
+import { Film, Save, FolderOpen } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { ClipSplitter } from './components/ClipSplitter'
 import { TemplateEditor } from './components/TemplateEditor'
 import { Badge } from '@/components/ui/badge'
@@ -11,6 +12,8 @@ import { Separator } from '@/components/ui/separator'
 
 function App() {
   const totalCombos = useStore((s) => s.getTotalCombinations())
+  const saveProject = useStore((s) => s.saveProject)
+  const loadProject = useStore((s) => s.loadProject)
 
   return (
     <div className="flex flex-col h-screen overflow-hidden">
@@ -19,6 +22,14 @@ function App() {
         <div className="flex items-center gap-3">
           <Film className="w-6 h-6 text-primary" />
           <h1 className="text-lg font-semibold">BatchEdit</h1>
+          <div className="flex items-center gap-1 ml-2">
+            <Button variant="ghost" size="sm" onClick={() => saveProject()} title="Save Project">
+              <Save className="w-4 h-4" />
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => loadProject()} title="Load Project">
+              <FolderOpen className="w-4 h-4" />
+            </Button>
+          </div>
         </div>
         <div className="flex items-center gap-4">
           <TemplateEditor />

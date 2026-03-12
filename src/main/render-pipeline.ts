@@ -1,5 +1,5 @@
 import { ipcMain, app } from 'electron'
-import { ffmpeg, getVideoMetadata, extractAudio, trimVideo, trimVideoReencode, detectLeadingSilence, trimLeadingSilence, getEncoder } from './ffmpeg'
+import { ffmpeg, getVideoMetadata, extractAudio, trimVideo, trimVideoReencode, detectLeadingSilence, trimLeadingSilence, getEncoder, getSoftwareEncoder, isGpuSessionError } from './ffmpeg'
 import { join, normalize } from 'path'
 import { writeFileSync, mkdirSync, unlinkSync, readFileSync, existsSync, statSync } from 'fs'
 import { tmpdir, cpus } from 'os'
@@ -102,6 +102,12 @@ export interface RenderJob {
   mediaOverlays?: { meat?: string; cta?: string }
   mediaOverlayPosition?: { x: number; y: number }
   meatDurationSec?: number
+  captionData?: {
+    clipWordChunks: Record<string, Array<{ text: string; start: number; end: number }>>
+    captionStyle?: FullCaptionStyle
+    captionPosition?: { x: number; y: number }
+    captionOffsetMs?: number
+  }
 }
 
 export interface RenderProgress {
@@ -114,7 +120,7 @@ export interface RenderProgress {
 /** Check if a job needs overlays/captions/text (the "slow path") */
 function jobNeedsOverlays(job: RenderJob): boolean {
   const hasText = !!(job.textOverlay && job.hookDurationSec)
-  const hasCaptions = !!job.captionsAssPath
+  const hasCaptions = !!job.captionsAssPath || !!job.captionData
   const hasMedia = !!(job.mediaOverlays && (job.mediaOverlays.meat || job.mediaOverlays.cta))
   return hasText || hasCaptions || hasMedia
 }
@@ -185,32 +191,43 @@ async function preNormalizeClip(
   }
 
   const outPath = join(tmpdir(), `batchedit-norm-${uuidv4()}.mp4`)
-  const { encoder, presetFlag } = getEncoder()
 
   const scaleFilter = autoResize
     ? `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},fps=30,setpts=PTS-STARTPTS`
     : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,fps=30,setpts=PTS-STARTPTS`
 
-  return new Promise<string>((resolve, reject) => {
-    ffmpeg(normalize(clipPath))
-      .videoFilters(scaleFilter)
-      .outputOptions([
-        '-y',
-        '-c:v', encoder, ...presetFlag,
-        '-c:a', 'aac', '-b:a', '128k',
-        '-movflags', '+faststart'
-      ])
-      .on('start', (cmd) => console.log(`[Normalize] ${cmd}`))
-      .on('end', () => {
-        normalizedClipCache.set(cacheKey, outPath)
-        resolve(outPath)
-      })
-      .on('error', (err, _stdout, stderr) => {
-        if (stderr) console.error(`[Normalize] stderr:\n${stderr}`)
-        reject(new Error(stderr ? `${err.message}\nFFmpeg output:\n${stderr}` : err.message))
-      })
-      .save(outPath)
-  })
+  function encodeWithConfig(encoderConfig: { encoder: string; presetFlag: string[] }): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      ffmpeg(normalize(clipPath))
+        .videoFilters(scaleFilter)
+        .outputOptions([
+          '-y',
+          '-c:v', encoderConfig.encoder, ...encoderConfig.presetFlag,
+          '-c:a', 'aac', '-b:a', '128k',
+          '-movflags', '+faststart'
+        ])
+        .on('start', (cmd) => console.log(`[Normalize] ${cmd}`))
+        .on('end', () => {
+          normalizedClipCache.set(cacheKey, outPath)
+          resolve(outPath)
+        })
+        .on('error', (err, _stdout, stderr) => {
+          if (stderr) console.error(`[Normalize] stderr:\n${stderr}`)
+          reject(new Error(stderr ? `${err.message}\nFFmpeg output:\n${stderr}` : err.message))
+        })
+        .save(outPath)
+    })
+  }
+
+  try {
+    return await encodeWithConfig(getEncoder())
+  } catch (err: any) {
+    if (isGpuSessionError(err.message)) {
+      console.log(`[Normalize] GPU session exhausted, retrying with libx264: ${clipPath}`)
+      return encodeWithConfig(getSoftwareEncoder())
+    }
+    throw err
+  }
 }
 
 /**
@@ -338,109 +355,149 @@ function concatWithOverlays(
 }
 
 /**
- * Apply overlays, text, and captions to a single concatenated input file.
+ * Build the filter graph and extra input list for overlay/caption rendering.
+ * Extracted so we can reuse it on GPU→CPU retry without regenerating ASS files.
  */
-function applyOverlays(
+function buildOverlayFilterGraph(
   job: RenderJob,
+  tempAssFiles: string[]
+): { filters: string[]; extraInputPaths: string[]; finalVideoLabel: string } {
+  const { width, height } = job.resolution
+  const filters: string[] = []
+  let currentLabel = '[0:v]'
+  let nextInputIdx = 1
+  const extraInputPaths: string[] = []
+
+  // Text overlay on hook segment
+  if (job.textOverlay && job.hookDurationSec) {
+    const assContent = generateTextOverlayAssFile(
+      job.textOverlay,
+      job.hookDurationSec,
+      job.resolution,
+      job.titlePosition
+    )
+    const assPath = join(tmpdir(), `batchedit-textoverlay-${uuidv4()}.ass`)
+    writeFileSync(assPath, assContent, 'utf-8')
+    tempAssFiles.push(assPath)
+
+    const escaped = escapeFilterPath(assPath)
+    filters.push(`${currentLabel}ass=${escaped}[vtxt]`)
+    currentLabel = '[vtxt]'
+  }
+
+  // Media overlay images
+  if (job.mediaOverlays && (job.mediaOverlays.meat || job.mediaOverlays.cta)) {
+    const overlayW = Math.round(width * 0.8 / 2) * 2
+    const pos = job.mediaOverlayPosition || { x: 50, y: 75 }
+    const posX = Math.round(width * pos.x / 100)
+    const posY = Math.round(height * pos.y / 100)
+    const hookDur = job.hookDurationSec || 0
+    const meatDur = job.meatDurationSec || 0
+
+    if (job.mediaOverlays.meat) {
+      const idx = nextInputIdx++
+      extraInputPaths.push(normalize(job.mediaOverlays.meat))
+      const outLabel = `[vovl${idx}]`
+      filters.push(`[${idx}:v]scale=${overlayW}:-2[ovl_${idx}]`)
+      filters.push(`${currentLabel}[ovl_${idx}]overlay=x=${posX}-overlay_w/2:y=${posY}-overlay_h/2:enable='between(t,${hookDur},${hookDur + meatDur})':eof_action=repeat${outLabel}`)
+      currentLabel = outLabel
+    }
+
+    if (job.mediaOverlays.cta) {
+      const idx = nextInputIdx++
+      extraInputPaths.push(normalize(job.mediaOverlays.cta))
+      const outLabel = `[vovl${idx}]`
+      filters.push(`[${idx}:v]scale=${overlayW}:-2[ovl_${idx}]`)
+      filters.push(`${currentLabel}[ovl_${idx}]overlay=x=${posX}-overlay_w/2:y=${posY}-overlay_h/2:enable='gte(t,${hookDur + meatDur})':eof_action=repeat${outLabel}`)
+      currentLabel = outLabel
+    }
+  }
+
+  // ASS captions
+  if (job.captionsAssPath) {
+    const escaped = escapeFilterPath(job.captionsAssPath)
+    const fontsDir = escapeFilterPath(getFontsDir())
+    filters.push(`${currentLabel}ass=${escaped}:fontsdir=${fontsDir}[vfinal]`)
+    currentLabel = '[vfinal]'
+  }
+
+  return { filters, extraInputPaths, finalVideoLabel: currentLabel }
+}
+
+/**
+ * Run the overlay encoding pass with a specific encoder config.
+ */
+function runOverlayEncode(
   inputPath: string,
   outputPath: string,
+  filters: string[],
+  extraInputPaths: string[],
+  finalVideoLabel: string,
+  encoderConfig: { encoder: string; presetFlag: string[] },
   onProgress: (percent: number) => void
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const { width, height } = job.resolution
-    const filters: string[] = []
-    const tempAssFiles: string[] = []
-    let currentLabel = '[0:v]'
-    let nextInputIdx = 1
-    const extraInputPaths: string[] = []
-
-    // Text overlay on hook segment
-    if (job.textOverlay && job.hookDurationSec) {
-      const assContent = generateTextOverlayAssFile(
-        job.textOverlay,
-        job.hookDurationSec,
-        job.resolution,
-        job.titlePosition
-      )
-      const assPath = join(tmpdir(), `batchedit-textoverlay-${uuidv4()}.ass`)
-      writeFileSync(assPath, assContent, 'utf-8')
-      tempAssFiles.push(assPath)
-
-      const escaped = escapeFilterPath(assPath)
-      filters.push(`${currentLabel}ass=${escaped}[vtxt]`)
-      currentLabel = '[vtxt]'
-    }
-
-    // Media overlay images
-    if (job.mediaOverlays && (job.mediaOverlays.meat || job.mediaOverlays.cta)) {
-      const overlayW = Math.round(width * 0.8 / 2) * 2
-      const pos = job.mediaOverlayPosition || { x: 50, y: 75 }
-      const posX = Math.round(width * pos.x / 100)
-      const posY = Math.round(height * pos.y / 100)
-      const hookDur = job.hookDurationSec || 0
-      const meatDur = job.meatDurationSec || 0
-
-      if (job.mediaOverlays.meat) {
-        const idx = nextInputIdx++
-        extraInputPaths.push(normalize(job.mediaOverlays.meat))
-        const outLabel = `[vovl${idx}]`
-        filters.push(`[${idx}:v]scale=${overlayW}:-2[ovl_${idx}]`)
-        filters.push(`${currentLabel}[ovl_${idx}]overlay=x=${posX}-overlay_w/2:y=${posY}-overlay_h/2:enable='between(t,${hookDur},${hookDur + meatDur})':eof_action=repeat${outLabel}`)
-        currentLabel = outLabel
-      }
-
-      if (job.mediaOverlays.cta) {
-        const idx = nextInputIdx++
-        extraInputPaths.push(normalize(job.mediaOverlays.cta))
-        const outLabel = `[vovl${idx}]`
-        filters.push(`[${idx}:v]scale=${overlayW}:-2[ovl_${idx}]`)
-        filters.push(`${currentLabel}[ovl_${idx}]overlay=x=${posX}-overlay_w/2:y=${posY}-overlay_h/2:enable='gte(t,${hookDur + meatDur})':eof_action=repeat${outLabel}`)
-        currentLabel = outLabel
-      }
-    }
-
-    // ASS captions
-    if (job.captionsAssPath) {
-      const escaped = escapeFilterPath(job.captionsAssPath)
-      const fontsDir = escapeFilterPath(getFontsDir())
-      filters.push(`${currentLabel}ass=${escaped}:fontsdir=${fontsDir}[vfinal]`)
-      currentLabel = '[vfinal]'
-    }
-
-    const finalVideoLabel = currentLabel
-
-    const command = ffmpeg()
-      .input(inputPath)
-
+    const command = ffmpeg().input(inputPath)
     for (const imgPath of extraInputPaths) {
       command.input(imgPath)
     }
-
-    const { encoder, presetFlag } = getEncoder()
-
     command
       .complexFilter(filters.join(';'))
       .outputOptions([
         '-y',
         '-map', finalVideoLabel,
         '-map', '0:a',
-        '-c:v', encoder, ...presetFlag,
+        '-c:v', encoderConfig.encoder, ...encoderConfig.presetFlag,
         '-c:a', 'aac', '-b:a', '128k',
         '-movflags', '+faststart'
       ])
       .on('start', (cmd) => console.log(`[FFmpeg overlay] ${cmd}`))
       .on('progress', (progress) => onProgress(progress.percent || 0))
-      .on('end', () => {
-        tempAssFiles.forEach((f) => { try { unlinkSync(f) } catch {} })
-        resolve()
-      })
+      .on('end', () => resolve())
       .on('error', (err, _stdout, stderr) => {
         if (stderr) console.error(`[FFmpeg overlay] stderr:\n${stderr}`)
-        tempAssFiles.forEach((f) => { try { unlinkSync(f) } catch {} })
         reject(new Error(stderr ? `${err.message}\nFFmpeg output:\n${stderr}` : err.message))
       })
       .save(outputPath)
   })
+}
+
+/**
+ * Apply overlays, text, and captions to a single concatenated input file.
+ * Automatically retries with libx264 if GPU encoder session limit is hit.
+ */
+async function applyOverlays(
+  job: RenderJob,
+  inputPath: string,
+  outputPath: string,
+  onProgress: (percent: number) => void
+): Promise<void> {
+  const tempAssFiles: string[] = []
+  const { filters, extraInputPaths, finalVideoLabel } = buildOverlayFilterGraph(job, tempAssFiles)
+
+  const cleanup = (): void => {
+    tempAssFiles.forEach((f) => { try { unlinkSync(f) } catch {} })
+  }
+
+  try {
+    await runOverlayEncode(inputPath, outputPath, filters, extraInputPaths, finalVideoLabel, getEncoder(), onProgress)
+    cleanup()
+  } catch (err: any) {
+    // If GPU encoder ran out of sessions, retry with software encoder
+    if (isGpuSessionError(err.message)) {
+      console.log(`[FFmpeg overlay] GPU session exhausted, retrying with libx264`)
+      try {
+        await runOverlayEncode(inputPath, outputPath, filters, extraInputPaths, finalVideoLabel, getSoftwareEncoder(), onProgress)
+        cleanup()
+      } catch (retryErr: any) {
+        cleanup()
+        throw retryErr
+      }
+    } else {
+      cleanup()
+      throw err
+    }
+  }
 }
 
 // Adaptive concurrency based on encoding method
@@ -451,13 +508,19 @@ const FAST_CONCURRENCY = Math.max(1, CPU_COUNT)
 
 /**
  * Slow-path concurrency depends on the active encoder.
- * GPU encoders (nvenc/qsv/vaapi) offload work to hardware, so we can
- * run more concurrent jobs. CPU encoding (libx264) is already heavy.
+ * GPU encoders have a hard session limit (consumer NVIDIA GPUs: ~3-5 NVENC
+ * sessions), so we cap concurrency to avoid "No capable devices found" errors.
+ * CPU encoding (libx264) scales with core count.
  */
 function getSlowConcurrency(): number {
   const { encoder } = getEncoder()
-  if (encoder === 'h264_nvenc' || encoder === 'h264_qsv' || encoder === 'h264_vaapi') {
-    return Math.max(2, Math.floor(CPU_COUNT * 0.75))
+  if (encoder === 'h264_nvenc') {
+    // Consumer GeForce GPUs allow ~3-5 concurrent NVENC sessions.
+    // Cap at 3 to be safe across all SKUs.
+    return 3
+  }
+  if (encoder === 'h264_qsv' || encoder === 'h264_vaapi') {
+    return Math.min(4, Math.max(2, Math.floor(CPU_COUNT * 0.5)))
   }
   // libx264 — conservative
   return Math.max(1, Math.floor(CPU_COUNT / 2))
@@ -664,6 +727,49 @@ export function setupRenderPipeline(): void {
         }
         event.sender.send('render:progress', results)
         return results
+      }
+
+      // --- Phase 1.5: Probe normalized durations, fix overlay timing, generate ASS ---
+      const probedDurations = new Map<string, number>()
+      for (const [originalPath, normalizedPath] of normalizedMap.entries()) {
+        try {
+          const meta = await getVideoMetadata(normalizedPath)
+          probedDurations.set(originalPath, meta.duration)
+        } catch {
+          // Fall back — leave duration unset, job will use original values
+        }
+      }
+
+      for (const job of jobs) {
+        // Fix overlay timing with probed durations
+        const probedHookDur = probedDurations.get(job.hookPath)
+        const probedMeatDur = probedDurations.get(job.meatPath)
+        if (probedHookDur !== undefined && job.hookDurationSec !== undefined) {
+          job.hookDurationSec = probedHookDur
+        }
+        if (probedMeatDur !== undefined && job.meatDurationSec !== undefined) {
+          job.meatDurationSec = probedMeatDur
+        }
+
+        // Generate ASS for jobs with captionData
+        if (job.captionData) {
+          const cd = job.captionData
+          const hookDurMs = (probedHookDur ?? job.hookDurationSec ?? 0) * 1000
+          const meatDurMs = (probedMeatDur ?? job.meatDurationSec ?? 0) * 1000
+          const ctaDurMs = (probedDurations.get(job.ctaPath) ?? 0) * 1000
+          const offsetMs = cd.captionOffsetMs ?? 0
+
+          const segments = [
+            { wordChunks: cd.clipWordChunks[job.hookPath] || [], offsetMs: 0 + offsetMs, durationMs: hookDurMs },
+            { wordChunks: cd.clipWordChunks[job.meatPath] || [], offsetMs: hookDurMs + offsetMs, durationMs: meatDurMs },
+            { wordChunks: cd.clipWordChunks[job.ctaPath] || [], offsetMs: hookDurMs + meatDurMs + offsetMs, durationMs: ctaDurMs }
+          ]
+
+          const assContent = generateCombinedAssFile(segments, job.resolution, cd.captionStyle, cd.captionPosition)
+          const assPath = join(tmpdir(), `batchedit-karaoke-${uuidv4()}.ass`)
+          writeFileSync(assPath, assContent, 'utf-8')
+          job.captionsAssPath = assPath
+        }
       }
 
       // Reset progress for rendering phase

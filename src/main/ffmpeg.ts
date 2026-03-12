@@ -116,6 +116,21 @@ export function getEncoder(): EncoderConfig {
   }
 }
 
+/** Software-only fallback encoder (always libx264, never GPU) */
+export function getSoftwareEncoder(): EncoderConfig {
+  return { encoder: 'libx264', presetFlag: ['-preset', 'veryfast', '-crf', '23'] }
+}
+
+/** Check if an FFmpeg error is an NVENC session exhaustion failure */
+export function isGpuSessionError(errorMessage: string): boolean {
+  return (
+    errorMessage.includes('OpenEncodeSessionEx failed') ||
+    errorMessage.includes('No capable devices found') ||
+    errorMessage.includes('Cannot load nvcuda.dll') ||
+    errorMessage.includes('out of memory')
+  )
+}
+
 export function isFFmpegAvailable(): boolean {
   return ffmpegReady
 }

@@ -162,6 +162,10 @@ interface AppState {
   whisperModel: string
   setWhisperModel: (model: string) => void
 
+  // Caption offset
+  captionOffsetMs: number
+  setCaptionOffsetMs: (ms: number) => void
+
   // Auto trim silence
   autoTrimSilence: boolean
   setAutoTrimSilence: (enabled: boolean) => void
@@ -184,6 +188,8 @@ interface AppState {
   setRenderProgress: (progress: RenderProgress[]) => void
   setIsRendering: (rendering: boolean) => void
   getTotalCombinations: () => number
+  saveProject: () => Promise<string | null>
+  loadProject: () => Promise<boolean>
   reset: () => void
 }
 
@@ -222,6 +228,9 @@ export const useStore = create<AppState>((set, get) => ({
     localStorage.setItem('batchedit-whisper-model', model)
     set({ whisperModel: model })
   },
+  captionOffsetMs: 0,
+  setCaptionOffsetMs: (ms) => set({ captionOffsetMs: ms }),
+
   autoTrimSilence: false,
   setAutoTrimSilence: (enabled) => set({ autoTrimSilence: enabled }),
 
@@ -326,6 +335,50 @@ export const useStore = create<AppState>((set, get) => ({
     const { hooks, meats, ctas } = get()
     if (hooks.length === 0 || meats.length === 0 || ctas.length === 0) return 0
     return hooks.length * meats.length * ctas.length
+  },
+
+  saveProject: async () => {
+    const state = get()
+    const project = {
+      version: 1,
+      hooks: state.hooks,
+      meats: state.meats,
+      ctas: state.ctas,
+      hookTexts: state.hookTexts,
+      settings: state.settings,
+      captionStyle: state.captionStyle,
+      templateLayout: state.templateLayout,
+      mediaOverlays: state.mediaOverlays,
+      autoTrimSilence: state.autoTrimSilence,
+      captionOffsetMs: state.captionOffsetMs
+    }
+    return window.api.saveProject(JSON.stringify(project, null, 2))
+  },
+
+  loadProject: async () => {
+    const data = await window.api.loadProject()
+    if (!data) return false
+    try {
+      const project = JSON.parse(data)
+      set({
+        hooks: project.hooks || [],
+        meats: project.meats || [],
+        ctas: project.ctas || [],
+        hookTexts: project.hookTexts || {},
+        settings: project.settings || { resolution: RESOLUTIONS['9:16'], outputDirectory: null },
+        captionStyle: project.captionStyle || CAPTION_PRESETS['hormozi-bold'],
+        templateLayout: project.templateLayout || { titleText: { x: 50, y: 12 }, subtitles: { x: 50, y: 65 }, media: { x: 50, y: 75 } },
+        mediaOverlays: project.mediaOverlays || { meat: null, cta: null },
+        autoTrimSilence: project.autoTrimSilence || false,
+        captionOffsetMs: project.captionOffsetMs || 0,
+        renderProgress: [],
+        isRendering: false,
+        errorLog: []
+      })
+      return true
+    } catch {
+      return false
+    }
   },
 
   reset: () =>

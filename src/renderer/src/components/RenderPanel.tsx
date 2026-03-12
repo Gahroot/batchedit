@@ -20,6 +20,7 @@ import {
   SelectContent,
   SelectItem
 } from '@/components/ui/select'
+import { Slider } from '@/components/ui/slider'
 
 export function RenderPanel() {
   const hooks = useStore((s) => s.hooks)
@@ -43,6 +44,8 @@ export function RenderPanel() {
   const setAutoTrimSilence = useStore((s) => s.setAutoTrimSilence)
   const whisperModel = useStore((s) => s.whisperModel)
   const setWhisperModel = useStore((s) => s.setWhisperModel)
+  const captionOffsetMs = useStore((s) => s.captionOffsetMs)
+  const setCaptionOffsetMs = useStore((s) => s.setCaptionOffsetMs)
 
   const { loadModel, transcribe, isModelLoading, isModelReady, isTranscribing, loadProgress } =
     useWhisper()
@@ -132,12 +135,6 @@ export function RenderPanel() {
           completed++
         }
 
-        setCaptionProgress({
-          stage: 'generating-ass',
-          currentClip: '',
-          completedClips: completed,
-          totalClips: uniquePaths.length
-        })
       }
     }
 
@@ -195,34 +192,18 @@ export function RenderPanel() {
           }
         }
 
-        // Add captions if available
+        // Add caption data for main process to generate ASS after normalization
         if (autoCaptions && Object.keys(transcriptionCache).length > 0) {
-          try {
-            const hookDurationMs = combo.hook.duration * 1000
-            const meatDurationMs = combo.meat.duration * 1000
-
-            const ctaDurationMs = combo.cta.duration * 1000
-
-            const segments = [
-              { wordChunks: transcriptionCache[combo.hook.path] || [], offsetMs: 0, durationMs: hookDurationMs },
-              { wordChunks: transcriptionCache[combo.meat.path] || [], offsetMs: hookDurationMs, durationMs: meatDurationMs },
-              {
-                wordChunks: transcriptionCache[combo.cta.path] || [],
-                offsetMs: hookDurationMs + meatDurationMs,
-                durationMs: ctaDurationMs
-              }
-            ]
-
-            const { id: _id, label: _label, ...styleProps } = captionStyle
-            const assPath = await window.api.generateCombinedAss({
-              segments,
-              resolution: job.resolution,
-              captionStyle: styleProps,
-              captionPosition: templateLayout.subtitles
-            })
-            job.captionsAssPath = assPath
-          } catch (err) {
-            console.error('Failed to generate ASS for combo:', err)
+          const { id: _id, label: _label, ...styleProps } = captionStyle
+          job.captionData = {
+            clipWordChunks: {
+              [combo.hook.path]: transcriptionCache[combo.hook.path] || [],
+              [combo.meat.path]: transcriptionCache[combo.meat.path] || [],
+              [combo.cta.path]: transcriptionCache[combo.cta.path] || [],
+            },
+            captionStyle: styleProps,
+            captionPosition: templateLayout.subtitles,
+            captionOffsetMs,
           }
         }
 
@@ -411,6 +392,20 @@ export function RenderPanel() {
                     <SelectItem value="onnx-community/whisper-small.en_timestamped">Small (accurate)</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                  {captionOffsetMs > 0 ? '+' : ''}{captionOffsetMs}ms
+                </span>
+                <Slider
+                  value={[captionOffsetMs]}
+                  onValueChange={([v]) => setCaptionOffsetMs(v)}
+                  min={-500}
+                  max={500}
+                  step={50}
+                  disabled={isRendering}
+                  className="w-20"
+                />
               </div>
             </>
           )}

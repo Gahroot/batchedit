@@ -30,6 +30,12 @@ interface RenderJob {
   mediaOverlays?: { meat?: string; cta?: string }
   mediaOverlayPosition?: { x: number; y: number }
   meatDurationSec?: number
+  captionData?: {
+    clipWordChunks: Record<string, Array<{ text: string; start: number; end: number }>>
+    captionStyle?: CaptionStyleOptions
+    captionPosition?: { x: number; y: number }
+    captionOffsetMs?: number
+  }
 }
 
 interface RenderProgress {
@@ -86,6 +92,8 @@ interface Api {
   detectLeadingSilence: (videoPath: string) => Promise<number>
   trimLeadingSilence: (videoPath: string, outputDir?: string) => Promise<{ outputPath: string; trimmedSeconds: number }>
   generateHookText: (apiKey: string, transcript: string) => Promise<string>
+  saveProject: (projectData: string) => Promise<string | null>
+  loadProject: () => Promise<string | null>
   renderBatch: (jobs: RenderJob[]) => Promise<RenderProgress[]>
   onRenderProgress: (callback: (progress: RenderProgress[]) => void) => () => void
 }

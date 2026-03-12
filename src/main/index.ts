@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, clipboard } from 'electron'
 import { join } from 'path'
+import { readFile, writeFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupFFmpeg } from './ffmpeg'
 import { setupRenderPipeline, clearNormalizedCache } from './render-pipeline'
@@ -156,6 +157,28 @@ Transcript: "${transcript}"`
       return result.response.text().trim()
     }
   )
+
+  // IPC: Save project file
+  ipcMain.handle('project:save', async (_event, projectData: string) => {
+    const result = await dialog.showSaveDialog({
+      filters: [{ name: 'BatchEdit Project', extensions: ['batchedit'] }],
+      defaultPath: 'project.batchedit'
+    })
+    if (result.canceled || !result.filePath) return null
+    await writeFile(result.filePath, projectData, 'utf-8')
+    return result.filePath
+  })
+
+  // IPC: Load project file
+  ipcMain.handle('project:load', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'BatchEdit Project', extensions: ['batchedit'] }]
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    const data = await readFile(result.filePaths[0], 'utf-8')
+    return data
+  })
 
   createWindow()
 

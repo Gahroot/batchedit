@@ -54,6 +54,10 @@ const api = {
   generateHookText: (apiKey: string, transcript: string) =>
     ipcRenderer.invoke('ai:generateHookText', apiKey, transcript),
 
+  // Project save/load
+  saveProject: (projectData: string) => ipcRenderer.invoke('project:save', projectData),
+  loadProject: () => ipcRenderer.invoke('project:load'),
+
   // Rendering
   renderBatch: (jobs: any[]) => ipcRenderer.invoke('render:batch', jobs),
   onRenderProgress: (callback: (progress: any[]) => void) => {
