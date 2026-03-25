@@ -71,6 +71,8 @@ export interface CaptionStyle {
   animation: CaptionAnimation
 }
 
+export type Platform = 'tiktok' | 'reels' | 'shorts' | 'universal'
+
 export interface TemplateLayout {
   titleText: { x: number; y: number }
   subtitles: { x: number; y: number }
@@ -154,6 +156,10 @@ interface AppState {
   templateLayout: TemplateLayout
   setTemplateLayout: (layout: TemplateLayout) => void
 
+  // Target platform for safe zones
+  targetPlatform: Platform
+  setTargetPlatform: (platform: Platform) => void
+
   // Media overlays (proof images for meat/CTA segments)
   mediaOverlays: { meat: string | null; cta: string | null }
   setMediaOverlay: (bucket: 'meat' | 'cta', path: string | null) => void
@@ -217,6 +223,8 @@ export const useStore = create<AppState>((set, get) => ({
   captionStyle: CAPTION_PRESETS['hormozi-bold'],
   geminiApiKey: localStorage.getItem('batchedit-gemini-key') || '',
   hookTextProgress: null,
+  targetPlatform: 'universal',
+  setTargetPlatform: (platform) => set({ targetPlatform: platform }),
   templateLayout: {
     titleText: { x: 50, y: 12 },
     subtitles: { x: 50, y: 65 },
@@ -348,6 +356,7 @@ export const useStore = create<AppState>((set, get) => ({
       settings: state.settings,
       captionStyle: state.captionStyle,
       templateLayout: state.templateLayout,
+      targetPlatform: state.targetPlatform,
       mediaOverlays: state.mediaOverlays,
       autoTrimSilence: state.autoTrimSilence,
       captionOffsetMs: state.captionOffsetMs
@@ -368,6 +377,7 @@ export const useStore = create<AppState>((set, get) => ({
         settings: project.settings || { resolution: RESOLUTIONS['9:16'], outputDirectory: null },
         captionStyle: project.captionStyle || CAPTION_PRESETS['hormozi-bold'],
         templateLayout: project.templateLayout || { titleText: { x: 50, y: 12 }, subtitles: { x: 50, y: 65 }, media: { x: 50, y: 75 } },
+        targetPlatform: project.targetPlatform || 'universal',
         mediaOverlays: project.mediaOverlays || { meat: null, cta: null },
         autoTrimSilence: project.autoTrimSilence || false,
         captionOffsetMs: project.captionOffsetMs || 0,

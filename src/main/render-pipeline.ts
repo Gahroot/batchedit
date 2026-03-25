@@ -4,6 +4,7 @@ import { join, normalize } from 'path'
 import { writeFileSync, mkdirSync, unlinkSync, readFileSync, existsSync, statSync } from 'fs'
 import { tmpdir, cpus } from 'os'
 import { v4 as uuidv4 } from 'uuid'
+import { clampToSafeZone, getElementPlacement, CANVAS_WIDTH, CANVAS_HEIGHT, type Platform } from './safe-zones'
 
 function getFontsDir(): string {
   if (app.isPackaged) {
@@ -102,6 +103,7 @@ export interface RenderJob {
   mediaOverlays?: { meat?: string; cta?: string }
   mediaOverlayPosition?: { x: number; y: number }
   meatDurationSec?: number
+  targetPlatform?: string
   captionData?: {
     clipWordChunks: Record<string, Array<{ text: string; start: number; end: number }>>
     captionStyle?: FullCaptionStyle

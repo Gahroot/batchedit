@@ -4,6 +4,18 @@ import { readFile, writeFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupFFmpeg } from './ffmpeg'
 import { setupRenderPipeline, clearNormalizedCache } from './render-pipeline'
+import {
+  PLATFORM_SAFE_ZONES,
+  getSafeZone,
+  getDeadZones,
+  getElementPlacement,
+  clampToSafeZone,
+  isInsideSafeZone,
+  rectToAssMargins,
+  type Platform,
+  type ElementType,
+  type SafeZoneRect
+} from './safe-zones'
 
 // Show copyable error dialog for uncaught exceptions
 process.on('uncaughtException', (error) => {
@@ -157,6 +169,27 @@ Transcript: "${transcript}"`
       return result.response.text().trim()
     }
   )
+
+  // IPC: Safe zone helpers
+  ipcMain.handle('safezones:getSafeZone', (_event, platform: Platform) =>
+    getSafeZone(platform)
+  )
+  ipcMain.handle('safezones:getDeadZones', (_event, platform: Platform) =>
+    getDeadZones(platform)
+  )
+  ipcMain.handle('safezones:getPlacement', (_event, platform: Platform, element: ElementType) =>
+    getElementPlacement(platform, element)
+  )
+  ipcMain.handle('safezones:clamp', (_event, rect: SafeZoneRect, platform: Platform) =>
+    clampToSafeZone(rect, platform)
+  )
+  ipcMain.handle('safezones:isInside', (_event, rect: SafeZoneRect, platform: Platform) =>
+    isInsideSafeZone(rect, platform)
+  )
+  ipcMain.handle('safezones:toAssMargins', (_event, rect: SafeZoneRect) =>
+    rectToAssMargins(rect)
+  )
+  ipcMain.handle('safezones:getAllPlatforms', () => PLATFORM_SAFE_ZONES)
 
   // IPC: Save project file
   ipcMain.handle('project:save', async (_event, projectData: string) => {

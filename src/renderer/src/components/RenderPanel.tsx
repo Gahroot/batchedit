@@ -46,6 +46,7 @@ export function RenderPanel() {
   const setWhisperModel = useStore((s) => s.setWhisperModel)
   const captionOffsetMs = useStore((s) => s.captionOffsetMs)
   const setCaptionOffsetMs = useStore((s) => s.setCaptionOffsetMs)
+  const targetPlatform = useStore((s) => s.targetPlatform)
 
   const { loadModel, transcribe, isModelLoading, isModelReady, isTranscribing, loadProgress } =
     useWhisper()
@@ -169,7 +170,8 @@ export function RenderPanel() {
           outputPath: `${settings.outputDirectory}/${outputName}`,
           resolution: { width: settings.resolution.width, height: settings.resolution.height },
           autoResize,
-          titlePosition: templateLayout.titleText
+          titlePosition: templateLayout.titleText,
+          targetPlatform
         }
 
         // Add text overlay if defined

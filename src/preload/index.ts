@@ -58,6 +58,15 @@ const api = {
   saveProject: (projectData: string) => ipcRenderer.invoke('project:save', projectData),
   loadProject: () => ipcRenderer.invoke('project:load'),
 
+  // Safe zones
+  getSafeZone: (platform: string) => ipcRenderer.invoke('safezones:getSafeZone', platform),
+  getDeadZones: (platform: string) => ipcRenderer.invoke('safezones:getDeadZones', platform),
+  getElementPlacement: (platform: string, element: string) => ipcRenderer.invoke('safezones:getPlacement', platform, element),
+  clampToSafeZone: (rect: { x: number; y: number; width: number; height: number }, platform: string) => ipcRenderer.invoke('safezones:clamp', rect, platform),
+  isInsideSafeZone: (rect: { x: number; y: number; width: number; height: number }, platform: string) => ipcRenderer.invoke('safezones:isInside', rect, platform),
+  toAssMargins: (rect: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke('safezones:toAssMargins', rect),
+  getAllPlatforms: () => ipcRenderer.invoke('safezones:getAllPlatforms'),
+
   // Rendering
   renderBatch: (jobs: any[]) => ipcRenderer.invoke('render:batch', jobs),
   onRenderProgress: (callback: (progress: any[]) => void) => {

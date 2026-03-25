@@ -1,5 +1,29 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
 
+type Platform = 'tiktok' | 'reels' | 'shorts' | 'universal'
+type ElementType = 'caption' | 'hook_text' | 'upper_third' | 'middle' | 'lower_third' | 'progress_bar' | 'logo' | 'comment_overlay' | 'full_frame'
+
+interface SafeZoneRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+interface PlatformDeadZones {
+  top: number
+  bottom: number
+  left: number
+  right: number
+}
+
+interface PlatformSafeZone {
+  name: string
+  safeRect: SafeZoneRect
+  deadZones: PlatformDeadZones
+  engagementButtonColumn: SafeZoneRect
+}
+
 interface VideoMetadata {
   duration: number
   width: number
@@ -30,6 +54,7 @@ interface RenderJob {
   mediaOverlays?: { meat?: string; cta?: string }
   mediaOverlayPosition?: { x: number; y: number }
   meatDurationSec?: number
+  targetPlatform?: string
   captionData?: {
     clipWordChunks: Record<string, Array<{ text: string; start: number; end: number }>>
     captionStyle?: CaptionStyleOptions
@@ -94,6 +119,13 @@ interface Api {
   generateHookText: (apiKey: string, transcript: string) => Promise<string>
   saveProject: (projectData: string) => Promise<string | null>
   loadProject: () => Promise<string | null>
+  getSafeZone: (platform: Platform) => Promise<SafeZoneRect>
+  getDeadZones: (platform: Platform) => Promise<PlatformDeadZones>
+  getElementPlacement: (platform: Platform, element: ElementType) => Promise<SafeZoneRect>
+  clampToSafeZone: (rect: SafeZoneRect, platform: Platform) => Promise<SafeZoneRect>
+  isInsideSafeZone: (rect: SafeZoneRect, platform: Platform) => Promise<boolean>
+  toAssMargins: (rect: SafeZoneRect) => Promise<{ MarginL: number; MarginR: number; MarginV: number }>
+  getAllPlatforms: () => Promise<Record<Platform, PlatformSafeZone>>
   renderBatch: (jobs: RenderJob[]) => Promise<RenderProgress[]>
   onRenderProgress: (callback: (progress: RenderProgress[]) => void) => () => void
 }
