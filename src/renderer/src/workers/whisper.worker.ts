@@ -1,14 +1,51 @@
-// Whisper Web Worker — singleton pipeline + message handlers
-// Uses @huggingface/transformers v3+ with WASM backend
+// Whisper Web Worker — WebGPU-accelerated transcription with Silero VAD for clean clip boundaries.
+// Uses @huggingface/transformers v3+.
+// VAD pattern adapted from huggingface/transformers.js-examples/moonshine-web.
+// WebGPU detection + dtype config pattern adapted from dmtrKovalenko/subtitler.
+
+import { pipeline, AutoModel, Tensor } from '@huggingface/transformers'
+
+// Silero VAD constants (from transformers.js-examples/moonshine-web/constants.js)
+const SAMPLE_RATE = 16000
+const SPEECH_THRESHOLD = 0.3
+const EXIT_THRESHOLD = 0.1
+const MIN_SILENCE_DURATION_MS = 400
+const VAD_WINDOW_SIZE = 512  // required Silero VAD window at 16kHz
+
+export interface SpeechInterval {
+  start: number
+  end: number
+}
+
+async function isWebGPUAvailable(): Promise<boolean> {
+  if (typeof navigator === 'undefined' || !(navigator as any).gpu) return false
+  try {
+    const adapter = await (navigator as any).gpu.requestAdapter()
+    return adapter != null
+  } catch {
+    return false
+  }
+}
+
+function getDtypeConfig(modelName: string, webgpu: boolean) {
+  const isLarge = modelName.includes('large-v3') || modelName.includes('distil-large')
+  if (webgpu && isLarge) {
+    return { encoder_model: 'q4f16' as const, decoder_model_merged: 'q4f16' as const }
+  }
+  if (webgpu) {
+    return { encoder_model: 'fp16' as const, decoder_model_merged: 'q4' as const }
+  }
+  return { encoder_model: 'fp32' as const, decoder_model_merged: 'q4' as const }
+}
 
 class PipelineFactory {
   static instance: any = null
   static currentModel: string | null = null
+  static device: 'webgpu' | 'wasm' = 'wasm'
 
   static async getInstance(model?: string, progressCallback?: (progress: any) => void) {
-    const targetModel = model || 'onnx-community/whisper-base.en_timestamped'
+    const targetModel = model || 'onnx-community/whisper-large-v3-turbo_timestamped'
 
-    // Invalidate if model changed
     if (this.instance && this.currentModel !== targetModel) {
       try { await this.instance.dispose?.() } catch {}
       this.instance = null
@@ -16,16 +53,14 @@ class PipelineFactory {
     }
 
     if (!this.instance) {
-      const { pipeline } = await import('@huggingface/transformers')
+      const webgpu = await isWebGPUAvailable()
+      this.device = webgpu ? 'webgpu' : 'wasm'
       this.instance = await pipeline(
         'automatic-speech-recognition',
         targetModel,
         {
-          dtype: {
-            encoder_model: 'fp32',
-            decoder_model_merged: 'q4'
-          },
-          device: 'wasm',
+          dtype: getDtypeConfig(targetModel, webgpu) as any,
+          device: this.device,
           progress_callback: progressCallback
         }
       )
@@ -33,6 +68,72 @@ class PipelineFactory {
     }
     return this.instance
   }
+}
+
+class VadFactory {
+  static instance: any = null
+
+  static async getInstance(progressCallback?: (progress: any) => void) {
+    if (!this.instance) {
+      this.instance = await AutoModel.from_pretrained('onnx-community/silero-vad', {
+        config: { model_type: 'custom' } as any,
+        dtype: 'fp32',
+        progress_callback: progressCallback
+      })
+    }
+    return this.instance
+  }
+}
+
+/**
+ * Run Silero VAD over the full audio buffer and return merged speech intervals
+ * (in seconds). Uses hysteresis (SPEECH_THRESHOLD to enter, EXIT_THRESHOLD to exit)
+ * and merges intervals separated by less than MIN_SILENCE_DURATION_MS so that
+ * natural breath pauses inside a sentence don't fragment speech.
+ */
+async function runVad(audio: Float32Array): Promise<SpeechInterval[]> {
+  const vad = await VadFactory.getInstance()
+  const sr = new Tensor('int64', [SAMPLE_RATE], [])
+  let state = new Tensor('float32', new Float32Array(2 * 1 * 128), [2, 1, 128])
+
+  const probs: number[] = []
+  for (let offset = 0; offset + VAD_WINDOW_SIZE <= audio.length; offset += VAD_WINDOW_SIZE) {
+    const slice = audio.subarray(offset, offset + VAD_WINDOW_SIZE)
+    const input = new Tensor('float32', slice, [1, VAD_WINDOW_SIZE])
+    const { stateN, output } = await vad({ input, sr, state })
+    state = stateN
+    probs.push(output.data[0])
+  }
+
+  const windowSec = VAD_WINDOW_SIZE / SAMPLE_RATE
+  const intervals: SpeechInterval[] = []
+  let inSpeech = false
+  let speechStart = 0
+  for (let i = 0; i < probs.length; i++) {
+    const p = probs[i]
+    const t = i * windowSec
+    if (!inSpeech && p > SPEECH_THRESHOLD) {
+      inSpeech = true
+      speechStart = t
+    } else if (inSpeech && p < EXIT_THRESHOLD) {
+      inSpeech = false
+      intervals.push({ start: speechStart, end: t })
+    }
+  }
+  if (inSpeech) {
+    intervals.push({ start: speechStart, end: probs.length * windowSec })
+  }
+
+  const minSilenceSec = MIN_SILENCE_DURATION_MS / 1000
+  const merged: SpeechInterval[] = []
+  for (const iv of intervals) {
+    if (merged.length && iv.start - merged[merged.length - 1].end < minSilenceSec) {
+      merged[merged.length - 1].end = iv.end
+    } else {
+      merged.push({ ...iv })
+    }
+  }
+  return merged
 }
 
 self.onmessage = async (e: MessageEvent) => {
@@ -45,7 +146,9 @@ self.onmessage = async (e: MessageEvent) => {
         await PipelineFactory.getInstance(data?.model, (progress) => {
           self.postMessage({ type: 'progress', progress })
         })
-        self.postMessage({ type: 'status', status: 'ready' })
+        // Warm VAD in parallel — tiny model, no user-visible progress needed
+        VadFactory.getInstance().catch(() => {})
+        self.postMessage({ type: 'status', status: 'ready', device: PipelineFactory.device })
       } catch (error) {
         self.postMessage({ type: 'status', status: 'error', error: String(error) })
       }
@@ -56,7 +159,6 @@ self.onmessage = async (e: MessageEvent) => {
       try {
         const transcriber = await PipelineFactory.getInstance(data?.model)
         const audio = data.audio as Float32Array
-        const SAMPLE_RATE = 16000
         const MAX_WORD_SEC = 2.0
         const MIN_GAP_SEC = 3.0
         const RESEG_SEC = 12   // max segment size for gap re-transcription
@@ -112,13 +214,11 @@ self.onmessage = async (e: MessageEvent) => {
             const endSample = Math.min(Math.floor(segEnd * SAMPLE_RATE), audio.length)
             if (endSample - startSample < SAMPLE_RATE * 0.5) continue
 
-            // Prepend silence padding so Whisper doesn't choke on the first word
             const rawSlice = audio.slice(startSample, endSample)
             const padded = new Float32Array(PAD_SAMPLES + rawSlice.length)
             padded.set(rawSlice, PAD_SAMPLES)
 
             const segResult = await transcriber(padded, { return_timestamps: 'word' })
-            // Offset = segStart - PAD_SEC because Whisper sees PAD_SEC of silence first
             const segChunks = parseChunks(segResult, segStart - PAD_SEC)
               .filter((c: { start: number }) => c.start >= Math.max(0, segStart - 0.2))
             recovered.push(...segChunks)
@@ -135,8 +235,7 @@ self.onmessage = async (e: MessageEvent) => {
         const wordChunks: Array<{ text: string; start: number; end: number }> = parseChunks(result)
         wordChunks.sort((a, b) => a.start - b.start)
 
-        // Detect and re-transcribe gaps (up to 2 passes — second pass catches
-        // sub-gaps left when a single 12s segment still hallucinates)
+        // Detect and re-transcribe gaps
         const audioDuration = audio.length / SAMPLE_RATE
         for (let pass = 0; pass < 2; pass++) {
           const gaps = findGaps(wordChunks, audioDuration)
@@ -146,7 +245,18 @@ self.onmessage = async (e: MessageEvent) => {
           }
           wordChunks.sort((a, b) => a.start - b.start)
         }
-        self.postMessage({ type: 'result', chunks: wordChunks })
+
+        // Run VAD in parallel with transcription post-processing when possible.
+        // VAD is carried-state sequential so we await it here.
+        let speechIntervals: SpeechInterval[] = []
+        try {
+          speechIntervals = await runVad(audio)
+        } catch (vadErr) {
+          // Non-fatal: marker detection falls back to pre-VAD behavior
+          console.warn('VAD failed, continuing without speech intervals', vadErr)
+        }
+
+        self.postMessage({ type: 'result', chunks: wordChunks, speechIntervals })
         self.postMessage({ type: 'status', status: 'done' })
       } catch (error) {
         self.postMessage({ type: 'status', status: 'error', error: String(error) })

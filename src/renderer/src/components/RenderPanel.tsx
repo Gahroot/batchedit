@@ -1,18 +1,16 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, Loader2, CheckCircle, AlertCircle, Captions, Crop, Scissors, Brain } from 'lucide-react'
+import { Play, Loader2, Captions, Crop, Scissors, Brain } from 'lucide-react'
 import { useStore, RenderProgress } from '../store'
 import { useWhisper } from '@/hooks/useWhisper'
 import { WhisperStatus } from './WhisperStatus'
 import { ErrorLog } from './ErrorLog'
 import { CaptionStylePicker } from './CaptionStylePicker'
-import { cn } from '../lib/utils'
 import { v4 as uuidv4 } from 'uuid'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { Switch } from '@/components/ui/switch'
-import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip'
 import {
   Select,
   SelectTrigger,
@@ -21,6 +19,11 @@ import {
   SelectItem
 } from '@/components/ui/select'
 import { Slider } from '@/components/ui/slider'
+import { NumberTicker } from '@/components/ui/number-ticker'
+import { PermutationMatrix } from './PermutationMatrix'
+import { ShimmerButton } from '@/components/ui/shimmer-button'
+import { toast } from 'sonner'
+import confetti from 'canvas-confetti'
 
 export function RenderPanel() {
   const hooks = useStore((s) => s.hooks)
@@ -33,6 +36,7 @@ export function RenderPanel() {
   const setRenderProgress = useStore((s) => s.setRenderProgress)
   const isRendering = useStore((s) => s.isRendering)
   const setIsRendering = useStore((s) => s.setIsRendering)
+  const setJobIdToComboId = useStore((s) => s.setJobIdToComboId)
   const captionProgress = useStore((s) => s.captionProgress)
   const setCaptionProgress = useStore((s) => s.setCaptionProgress)
   const addError = useStore((s) => s.addError)
@@ -80,6 +84,19 @@ export function RenderPanel() {
       Array<{ text: string; start: number; end: number }>
     > = {}
 
+    // Generate all combinations
+    const combos: { id: string; hook: typeof hooks[0]; meat: typeof meats[0]; cta: typeof ctas[0] }[] = []
+    for (const hook of hooks) {
+      for (const meat of meats) {
+        for (const cta of ctas) {
+          combos.push({ id: `${hook.id}__${meat.id}__${cta.id}`, hook, meat, cta })
+        }
+      }
+    }
+
+    // Limit if not rendering all
+    const toRender = renderCount === 'all' ? combos : combos.slice(0, renderCount)
+
     if (autoCaptions) {
       // Load model first — if this fails, skip all captions
       let modelLoaded = isModelReady
@@ -93,20 +110,24 @@ export function RenderPanel() {
           })
           await loadModel(whisperModel)
           modelLoaded = true
+          toast.success('Whisper model ready')
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           console.error('Whisper model loading failed:', err)
           addError({ source: 'caption', clipName: 'Whisper Model', message: msg })
+          toast.error('Whisper model failed to load')
           setCaptionProgress(null)
         }
       }
 
       if (modelLoaded) {
-        // Get all unique clip paths
+        // Only transcribe clips used by the combos we're about to render
         const allClipPaths = new Set<string>()
-        hooks.forEach((c) => allClipPaths.add(c.path))
-        meats.forEach((c) => allClipPaths.add(c.path))
-        ctas.forEach((c) => allClipPaths.add(c.path))
+        for (const combo of toRender) {
+          allClipPaths.add(combo.hook.path)
+          allClipPaths.add(combo.meat.path)
+          allClipPaths.add(combo.cta.path)
+        }
 
         const uniquePaths = Array.from(allClipPaths)
         let completed = 0
@@ -125,7 +146,7 @@ export function RenderPanel() {
             const wavPath = await window.api.extractAudio(clipPath)
             const audioBuffer = await window.api.readAudioBuffer(wavPath)
             const audioData = new Float32Array(audioBuffer)
-            const chunks = await transcribe(audioData, whisperModel)
+            const { chunks } = await transcribe(audioData, whisperModel)
             transcriptionCache[clipPath] = chunks
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
@@ -136,26 +157,18 @@ export function RenderPanel() {
           completed++
         }
 
-      }
-    }
-
-    // Generate all combinations
-    const combos: { hook: typeof hooks[0]; meat: typeof meats[0]; cta: typeof ctas[0] }[] = []
-    for (const hook of hooks) {
-      for (const meat of meats) {
-        for (const cta of ctas) {
-          combos.push({ hook, meat, cta })
+        if (completed > 0) {
+          toast.success(`Transcribed ${completed} clip${completed === 1 ? '' : 's'}`)
         }
       }
     }
 
-    // Limit if not rendering all
-    const toRender = renderCount === 'all' ? combos : combos.slice(0, renderCount)
-
     // Build render jobs
+    const jobMap: Record<string, string> = {}
     const jobs = await Promise.all(
       toRender.map(async (combo, idx) => {
         const id = uuidv4()
+        jobMap[id] = combo.id
         const hookText = hookTexts[combo.hook.id]
         const hookLabel = hookText && hookText.trim()
           ? hookText.trim().replace(/[<>:"/\\|?*]+/g, '').replace(/\s+/g, ' ')
@@ -214,6 +227,7 @@ export function RenderPanel() {
     )
 
     setCaptionProgress(null)
+    setJobIdToComboId(jobMap)
 
     try {
       await window.api.renderBatch(jobs)
@@ -222,8 +236,10 @@ export function RenderPanel() {
     } finally {
       // Log any errored render jobs
       const finalProgress = useStore.getState().renderProgress
+      let errorCount = 0
       for (const rp of finalProgress) {
         if (rp.status === 'error') {
+          errorCount++
           const job = jobs.find((j) => j.id === rp.jobId)
           const outputName = job
             ? job.outputPath.split(/[/\\]/).pop() || rp.jobId
@@ -235,6 +251,21 @@ export function RenderPanel() {
           })
         }
       }
+
+      const doneCount = finalProgress.filter((r) => r.status === 'done').length
+      const totalJobs = finalProgress.length
+      if (totalJobs > 0 && errorCount === 0) {
+        toast.success(`${doneCount} video${doneCount === 1 ? '' : 's'} rendered`)
+        confetti({
+          particleCount: 120,
+          spread: 70,
+          origin: { y: 0.7 },
+          disableForReducedMotion: true
+        })
+      } else if (errorCount > 0) {
+        toast.error(`${errorCount} of ${totalJobs} render${totalJobs === 1 ? '' : 's'} failed`)
+      }
+
       setIsRendering(false)
     }
   }
@@ -267,56 +298,19 @@ export function RenderPanel() {
             <div className="flex items-center gap-3 mb-2">
               <Progress value={overallPercent} className="flex-1 h-2" />
               <div className="flex items-center gap-2">
-                <Badge variant="secondary">{completed}/{total} done</Badge>
-                {errors > 0 && <Badge variant="destructive">{errors} err</Badge>}
+                <Badge variant="secondary" className="font-mono">
+                  <NumberTicker value={completed} />/{total} done
+                </Badge>
+                {errors > 0 && (
+                  <Badge variant="destructive" className="font-mono">
+                    <NumberTicker value={errors} /> err
+                  </Badge>
+                )}
               </div>
             </div>
 
-            {/* Individual Job Progress */}
-            <TooltipProvider>
-            <div className="max-h-32 overflow-y-auto space-y-1">
-              {renderProgress.map((rp) => {
-                const row = (
-                  <div key={rp.jobId} className="flex items-center gap-2 text-[10px]">
-                    {rp.status === 'done' ? (
-                      <CheckCircle className="w-3 h-3 text-green-500 shrink-0" />
-                    ) : rp.status === 'error' ? (
-                      <AlertCircle className="w-3 h-3 text-destructive shrink-0" />
-                    ) : rp.status === 'rendering' || rp.status === 'normalizing' ? (
-                      <Loader2 className="w-3 h-3 animate-spin text-primary shrink-0" />
-                    ) : (
-                      <div className="w-3 h-3 rounded-full border border-border shrink-0" />
-                    )}
-                    <div className="flex-1 h-1 rounded-full bg-secondary overflow-hidden">
-                      <div
-                        className={cn(
-                          'h-full rounded-full transition-all',
-                          rp.status === 'error' ? 'bg-destructive' : 'bg-primary'
-                        )}
-                        style={{ width: `${rp.percent}%` }}
-                      />
-                    </div>
-                    <span className="font-mono text-muted-foreground w-10 text-right">
-                      {rp.status === 'error' ? 'ERR' : rp.status === 'normalizing' ? 'NORM' : `${Math.round(rp.percent)}%`}
-                    </span>
-                  </div>
-                )
-
-                if (rp.status === 'error' && rp.error) {
-                  return (
-                    <Tooltip key={rp.jobId}>
-                      <TooltipTrigger asChild>{row}</TooltipTrigger>
-                      <TooltipContent side="top" className="max-w-xs text-xs">
-                        {rp.error}
-                      </TooltipContent>
-                    </Tooltip>
-                  )
-                }
-
-                return row
-              })}
-            </div>
-            </TooltipProvider>
+            {/* Permutation Matrix */}
+            <PermutationMatrix />
           </motion.div>
         )}
       </AnimatePresence>
@@ -392,6 +386,7 @@ export function RenderPanel() {
                     <SelectItem value="onnx-community/whisper-tiny.en_timestamped">Tiny (fast)</SelectItem>
                     <SelectItem value="onnx-community/whisper-base.en_timestamped">Base (balanced)</SelectItem>
                     <SelectItem value="onnx-community/whisper-small.en_timestamped">Small (accurate)</SelectItem>
+                    <SelectItem value="onnx-community/whisper-large-v3-turbo_timestamped">Turbo (best, WebGPU)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -437,19 +432,26 @@ export function RenderPanel() {
           </label>
 
           {/* Render Button */}
-          <Button size="lg" onClick={handleRender} disabled={!canRender}>
-            {isRendering ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Rendering...
-              </>
-            ) : (
-              <>
-                <Play className="w-4 h-4" />
-                Render {renderCount === 'all' ? totalCombos : renderCount} Videos
-              </>
-            )}
-          </Button>
+          {canRender ? (
+            <ShimmerButton onClick={handleRender} className="gap-2">
+              <Play className="w-4 h-4" />
+              Render {renderCount === 'all' ? totalCombos : renderCount} Videos
+            </ShimmerButton>
+          ) : (
+            <Button size="lg" onClick={handleRender} disabled={!canRender}>
+              {isRendering ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Rendering...
+                </>
+              ) : (
+                <>
+                  <Play className="w-4 h-4" />
+                  Render {renderCount === 'all' ? totalCombos : renderCount} Videos
+                </>
+              )}
+            </Button>
+          )}
         </div>
       </div>
     </div>

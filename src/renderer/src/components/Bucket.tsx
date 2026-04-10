@@ -21,6 +21,15 @@ import { SortableContext, verticalListSortingStrategy, arrayMove } from '@dnd-ki
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers'
 import { SortableClip } from './SortableClip'
 import { ClipEditor } from './ClipEditor'
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator
+} from '@/components/ui/context-menu'
+import { BlurText } from '@/components/ui/blur-text'
+import { toast } from 'sonner'
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mkv', '.webm']
 
@@ -297,10 +306,19 @@ export function Bucket({ type, label, color }: BucketProps) {
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
-                  className="flex flex-col items-center justify-center h-full text-muted-foreground text-sm gap-2 py-12"
+                  className="flex flex-col items-center justify-center h-full text-muted-foreground text-sm gap-3 py-12"
                 >
-                  <FileVideo className="w-8 h-8 opacity-30" />
-                  <p>Drop clips here or click Add</p>
+                  <motion.div
+                    initial={{ scale: 0.8, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 0.3 }}
+                    transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+                  >
+                    <FileVideo className="w-10 h-10" />
+                  </motion.div>
+                  <BlurText
+                    text={`Drop ${label.toLowerCase()} here or click Add`}
+                    className="text-xs"
+                  />
                 </motion.div>
               </AnimatePresence>
             ) : (
@@ -316,6 +334,8 @@ export function Bucket({ type, label, color }: BucketProps) {
                         exit={{ opacity: 0, x: -20 }}
                       >
                         <SortableClip id={clip.id} disabled={isRendering}>
+                          <ContextMenu>
+                            <ContextMenuTrigger asChild>
                           <div className="group flex flex-col gap-1.5 p-2.5 rounded-md bg-secondary/50 hover:bg-secondary transition-colors">
                             <div className="flex items-center gap-2">
                               {clip.thumbnail ? (
@@ -383,6 +403,26 @@ export function Bucket({ type, label, color }: BucketProps) {
                               </div>
                             )}
                           </div>
+                            </ContextMenuTrigger>
+                            <ContextMenuContent>
+                              <ContextMenuItem onSelect={() => setEditingClipId(clip.id)} disabled={isRendering}>
+                                <Pencil className="w-3.5 h-3.5 mr-2" /> Edit clip
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                onSelect={() => toast.info('Reveal in folder: coming soon')}
+                              >
+                                <FileVideo className="w-3.5 h-3.5 mr-2" /> Reveal in folder
+                              </ContextMenuItem>
+                              <ContextMenuSeparator />
+                              <ContextMenuItem
+                                onSelect={() => removeClip(type, clip.id)}
+                                disabled={isRendering}
+                                className="text-destructive focus:text-destructive"
+                              >
+                                <X className="w-3.5 h-3.5 mr-2" /> Remove
+                              </ContextMenuItem>
+                            </ContextMenuContent>
+                          </ContextMenu>
                         </SortableClip>
                       </motion.div>
                     ))}

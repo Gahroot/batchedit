@@ -6,6 +6,43 @@ export interface WhisperChunk {
   end: number   // seconds
 }
 
+export interface SpeechInterval {
+  start: number
+  end: number
+}
+
+/** Minimum silence before a marker phrase for it to count as a real cue (not speech-internal). */
+const MARKER_LEAD_SILENCE_SEC = 0.3
+
+/** Find the gap index between two speech intervals covering time `t`, or null. */
+function silenceAfter(
+  t: number,
+  intervals: SpeechInterval[]
+): { start: number; end: number } | null {
+  for (let i = 0; i < intervals.length; i++) {
+    if (intervals[i].start >= t) {
+      const prevEnd = i > 0 ? intervals[i - 1].end : 0
+      return { start: Math.max(prevEnd, t), end: intervals[i].start }
+    }
+  }
+  // Past the last speech interval → silence until end
+  const last = intervals[intervals.length - 1]
+  if (last && t >= last.end) return { start: t, end: Infinity }
+  return null
+}
+
+/** True if there is ≥ MARKER_LEAD_SILENCE_SEC of silence ending at or just before `t`. */
+function hasSilenceBefore(t: number, intervals: SpeechInterval[]): boolean {
+  if (intervals.length === 0) return true // no VAD info → don't gate
+  for (let i = 0; i < intervals.length; i++) {
+    if (intervals[i].start >= t) {
+      const prevEnd = i > 0 ? intervals[i - 1].end : 0
+      return t - prevEnd >= MARKER_LEAD_SILENCE_SEC
+    }
+  }
+  return true // t is past all speech → definitely silent lead-in
+}
+
 export interface DetectedMarker {
   id: string
   label: string
@@ -163,24 +200,33 @@ function matchBucketMulti(
 
 const MIN_CLIP_SEC = 0.5
 
-/** Compute start/end times for markers based on content word positions */
+/** Compute start/end times for markers based on content words and VAD silence. */
 function computeTimings(
   markers: DetectedMarker[],
   wordChunks: WhisperChunk[],
   used: Set<number>,
-  videoDuration: number
+  videoDuration: number,
+  speechIntervals: SpeechInterval[]
 ): void {
   for (let i = 0; i < markers.length; i++) {
-    const lastMarkerIdx = markers[i].markerChunkIndices[markers[i].markerChunkIndices.length - 1]
+    const markerIndices = markers[i].markerChunkIndices
+    const hasMarkerWords = markerIndices.length > 0
+    const lastMarkerIdx = hasMarkerWords ? markerIndices[markerIndices.length - 1] : -1
     const nextWordIdx = lastMarkerIdx + 1
-    markers[i].startTime = nextWordIdx < wordChunks.length
-      ? wordChunks[nextWordIdx].start
-      : wordChunks[lastMarkerIdx].end
 
-    const boundaryIdx = i + 1 < markers.length
+    // Start: first non-marker word after the marker phrase
+    if (hasMarkerWords) {
+      markers[i].startTime = nextWordIdx < wordChunks.length
+        ? wordChunks[nextWordIdx].start
+        : wordChunks[lastMarkerIdx].end
+    }
+
+    // Next marker boundary (where the following clip's marker begins)
+    const boundaryIdx = i + 1 < markers.length && markers[i + 1].markerChunkIndices.length > 0
       ? markers[i + 1].markerChunkIndices[0]
       : wordChunks.length
 
+    // Find last content word before the next marker
     let lastContentEnd = markers[i].startTime
     for (let j = boundaryIdx - 1; j >= nextWordIdx; j--) {
       if (!used.has(j)) {
@@ -189,32 +235,63 @@ function computeTimings(
       }
     }
 
-    const nextMarkerStart = i + 1 < markers.length
+    const nextMarkerStart = i + 1 < markers.length && markers[i + 1].markerChunkIndices.length > 0
       ? wordChunks[markers[i + 1].markerChunkIndices[0]].start
       : videoDuration
 
     if (lastContentEnd > markers[i].startTime) {
-      // Content words found → use adaptive buffer
       const silenceGap = nextMarkerStart - lastContentEnd
       const buffer = silenceGap > 0.5 ? 0.1 : 0.2
       markers[i].endTime = Math.min(lastContentEnd + buffer, nextMarkerStart, videoDuration)
     } else {
-      // No content words found — Whisper couldn't transcribe this section,
-      // but audio content exists between markers. Extend to boundary;
-      // post-split trimLeadingSilence() handles trailing silence.
       markers[i].endTime = Math.min(nextMarkerStart, videoDuration)
+    }
+
+    // VAD-based boundary snapping — clamp endTime to end of last speech interval
+    // before the next marker phrase, preventing the marker word and trailing
+    // silence from bleeding into the clip.
+    if (speechIntervals.length > 0) {
+      const gap = silenceAfter(lastContentEnd, speechIntervals)
+      if (gap && gap.start <= nextMarkerStart && gap.start > markers[i].startTime) {
+        // Snap endTime to just after speech ends (+ small breathing buffer)
+        const snapEnd = Math.min(gap.start + 0.15, nextMarkerStart, videoDuration)
+        if (snapEnd > markers[i].startTime) {
+          markers[i].endTime = snapEnd
+        }
+      }
+
+      // Snap startTime forward past any leading silence after the marker phrase
+      const startGap = silenceAfter(markers[i].startTime - 0.01, speechIntervals)
+      if (startGap && startGap.end > markers[i].startTime && startGap.end < markers[i].endTime) {
+        // Pull in by up to the silence end, minus small pre-roll
+        markers[i].startTime = Math.max(markers[i].startTime, startGap.end - 0.05)
+      }
     }
   }
 }
 
 let nextId = 1
 
-export function detectMarkers(wordChunks: WhisperChunk[], videoDuration: number): DetectedMarker[] {
+export function detectMarkers(
+  wordChunks: WhisperChunk[],
+  videoDuration: number,
+  speechIntervals: SpeechInterval[] = []
+): DetectedMarker[] {
   const markers: DetectedMarker[] = []
   const used = new Set<number>()
 
   // Pre-normalize all chunk texts once
   const normed = wordChunks.map((w) => normalize(w.text))
+
+  /**
+   * Gate candidate markers: the marker phrase must be preceded by ≥300ms of
+   * silence (per VAD). This kills false positives like "my hook is..." where
+   * "hook" is speech-internal rather than a real cue.
+   */
+  const markerHasSilenceLead = (firstChunkIdx: number): boolean => {
+    if (speechIntervals.length === 0) return true
+    return hasSilenceBefore(wordChunks[firstChunkIdx].start, speechIntervals)
+  }
 
   // Pass 0: fused single-token bucket+number (e.g. "cta2", "hook1", "meettwo")
   for (let i = 0; i < wordChunks.length; i++) {
@@ -223,6 +300,7 @@ export function detectMarkers(wordChunks: WhisperChunk[], videoDuration: number)
 
     const fused = matchFused(normed[i])
     if (!fused) continue
+    if (!markerHasSilenceLead(i)) continue
 
     const bucketLabel = fused.bucket === 'cta'
       ? 'CTA'
@@ -252,6 +330,7 @@ export function detectMarkers(wordChunks: WhisperChunk[], videoDuration: number)
 
     const num = parseNumber(normed[numberIdx])
     if (num === null) continue
+    if (!markerHasSilenceLead(i)) continue
 
     const indices = Array.from({ length: multi.wordsConsumed + 1 }, (_, k) => i + k)
     const bucketLabel = multi.bucket === 'cta'
@@ -282,6 +361,7 @@ export function detectMarkers(wordChunks: WhisperChunk[], videoDuration: number)
 
     const num = parseNumber(normed[numIdx])
     if (num === null) continue
+    if (!markerHasSilenceLead(i)) continue
 
     const bucketLabel = bucket === 'cta'
       ? 'CTA'
@@ -330,13 +410,13 @@ export function detectMarkers(wordChunks: WhisperChunk[], videoDuration: number)
   const dedupedMarkers = markers.filter((_, i) => !removedIndices.has(i))
 
   // Compute initial timings
-  computeTimings(dedupedMarkers, wordChunks, used, videoDuration)
+  computeTimings(dedupedMarkers, wordChunks, used, videoDuration, speechIntervals)
 
   // Drop markers producing unusably short clips (hallucinated rapid-fire markers)
   const validMarkers = dedupedMarkers.filter(m => m.endTime - m.startTime >= MIN_CLIP_SEC)
 
   // Recompute — removing bad markers shifts boundaries outward for survivors
-  computeTimings(validMarkers, wordChunks, used, videoDuration)
+  computeTimings(validMarkers, wordChunks, used, videoDuration, speechIntervals)
 
   return validMarkers
 }

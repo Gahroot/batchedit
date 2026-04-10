@@ -6,6 +6,16 @@ export interface WhisperChunk {
   end: number   // seconds
 }
 
+export interface SpeechInterval {
+  start: number
+  end: number
+}
+
+export interface TranscribeResult {
+  chunks: WhisperChunk[]
+  speechIntervals: SpeechInterval[]
+}
+
 export function useWhisper() {
   const workerRef = useRef<Worker | null>(null)
   const [isModelLoading, setIsModelLoading] = useState(false)
@@ -60,7 +70,7 @@ export function useWhisper() {
     })
   }, [isModelReady])
 
-  const transcribe = useCallback((audioData: Float32Array, model?: string): Promise<WhisperChunk[]> => {
+  const transcribe = useCallback((audioData: Float32Array, model?: string): Promise<TranscribeResult> => {
     return new Promise((resolve, reject) => {
       const worker = workerRef.current
       if (!worker) return reject(new Error('Worker not initialized'))
@@ -71,7 +81,7 @@ export function useWhisper() {
         if (msg.type === 'result') {
           setIsTranscribing(false)
           worker.removeEventListener('message', handler)
-          resolve(msg.chunks)
+          resolve({ chunks: msg.chunks, speechIntervals: msg.speechIntervals || [] })
         } else if (msg.type === 'status' && msg.status === 'error') {
           setIsTranscribing(false)
           worker.removeEventListener('message', handler)

@@ -1,3 +1,4 @@
+import { GoogleGenerativeAI } from '@google/generative-ai'
 import { app, shell, BrowserWindow, ipcMain, dialog, clipboard } from 'electron'
 import { join } from 'path'
 import { readFile, writeFile } from 'fs/promises'
@@ -111,7 +112,6 @@ app.whenReady().then(() => {
   ipcMain.handle(
     'ai:generateHookText',
     async (_event, apiKey: string, transcript: string): Promise<string> => {
-      const { GoogleGenerativeAI } = await import('@google/generative-ai')
       const genAI = new GoogleGenerativeAI(apiKey)
       const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' })
 

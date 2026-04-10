@@ -9,6 +9,8 @@ import { ClipSplitter } from './components/ClipSplitter'
 import { TemplateEditor } from './components/TemplateEditor'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
+import { Toaster } from '@/components/ui/sonner'
+import { NumberTicker } from '@/components/ui/number-ticker'
 
 function App() {
   const totalCombos = useStore((s) => s.getTotalCombinations())
@@ -34,14 +36,20 @@ function App() {
         <div className="flex items-center gap-4">
           <TemplateEditor />
           <ClipSplitter />
-          {totalCombos > 0 && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-            >
-              <Badge variant="secondary" className="font-mono">{totalCombos} combinations</Badge>
-            </motion.div>
-          )}
+          <AnimatePresence>
+            {totalCombos > 0 && (
+              <motion.div
+                key="combos-badge"
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+              >
+                <Badge variant="secondary" className="font-mono">
+                  <NumberTicker value={totalCombos} /> combinations
+                </Badge>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </header>
 
@@ -58,6 +66,9 @@ function App() {
 
       {/* Render Panel */}
       <RenderPanel />
+
+      {/* Global toast container */}
+      <Toaster richColors position="bottom-right" />
     </div>
   )
 }

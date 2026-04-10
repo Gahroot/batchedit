@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, ChevronRight, Copy, Trash2 } from 'lucide-react'
 import { useStore, ErrorLogEntry } from '../store'
 import { Button } from '@/components/ui/button'
@@ -62,26 +63,33 @@ export function ErrorLog() {
           </div>
           <ScrollArea className="max-h-40">
             <div className="space-y-1">
-              {errorLog.map((entry) => (
-                <div
-                  key={entry.id}
-                  onClick={() => copyOne(entry)}
-                  className="flex items-start gap-1.5 text-[10px] p-1 rounded hover:bg-destructive/10 cursor-pointer transition-colors select-text"
-                  title="Click to copy"
-                >
-                  <Badge
-                    variant="outline"
-                    className="text-[9px] px-1 py-0 shrink-0 font-mono border-destructive/40"
+              <AnimatePresence initial={false}>
+                {errorLog.map((entry) => (
+                  <motion.div
+                    key={entry.id}
+                    layout
+                    initial={{ opacity: 0, x: -8 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 8 }}
+                    transition={{ duration: 0.2 }}
+                    onClick={() => copyOne(entry)}
+                    className="flex items-start gap-1.5 text-[10px] p-1 rounded hover:bg-destructive/10 cursor-pointer transition-colors select-text"
+                    title="Click to copy"
                   >
-                    {entry.source === 'caption' ? 'CAP' : entry.source === 'hooktext' ? 'AI' : 'REN'}
-                  </Badge>
-                  <span className="text-muted-foreground shrink-0 font-mono">
-                    {formatTime(entry.timestamp)}
-                  </span>
-                  <span className="font-medium shrink-0">{entry.clipName}</span>
-                  <span className="text-muted-foreground truncate">{entry.message}</span>
-                </div>
-              ))}
+                    <Badge
+                      variant="outline"
+                      className="text-[9px] px-1 py-0 shrink-0 font-mono border-destructive/40"
+                    >
+                      {entry.source === 'caption' ? 'CAP' : entry.source === 'hooktext' ? 'AI' : 'REN'}
+                    </Badge>
+                    <span className="text-muted-foreground shrink-0 font-mono">
+                      {formatTime(entry.timestamp)}
+                    </span>
+                    <span className="font-medium shrink-0">{entry.clipName}</span>
+                    <span className="text-muted-foreground truncate">{entry.message}</span>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
             </div>
           </ScrollArea>
         </div>

@@ -30,6 +30,13 @@ export interface RenderProgress {
   error?: string
 }
 
+export interface Combo {
+  id: string
+  hook: Clip
+  meat: Clip
+  cta: Clip
+}
+
 export interface CaptionProgress {
   stage: 'idle' | 'loading-model' | 'transcribing' | 'generating-ass' | 'done'
   currentClip: string
@@ -137,6 +144,8 @@ interface AppState {
   // Render state
   renderProgress: RenderProgress[]
   isRendering: boolean
+  jobIdToComboId: Record<string, string>
+  setJobIdToComboId: (map: Record<string, string>) => void
 
   // Caption state
   captionProgress: CaptionProgress | null
@@ -194,6 +203,7 @@ interface AppState {
   setRenderProgress: (progress: RenderProgress[]) => void
   setIsRendering: (rendering: boolean) => void
   getTotalCombinations: () => number
+  getCombos: () => Combo[]
   saveProject: () => Promise<string | null>
   loadProject: () => Promise<boolean>
   reset: () => void
@@ -219,6 +229,8 @@ export const useStore = create<AppState>((set, get) => ({
   },
   renderProgress: [],
   isRendering: false,
+  jobIdToComboId: {},
+  setJobIdToComboId: (map) => set({ jobIdToComboId: map }),
   captionProgress: null,
   captionStyle: CAPTION_PRESETS['hormozi-bold'],
   geminiApiKey: localStorage.getItem('batchedit-gemini-key') || '',
@@ -231,7 +243,7 @@ export const useStore = create<AppState>((set, get) => ({
     media: { x: 50, y: 75 }
   },
   mediaOverlays: { meat: null, cta: null },
-  whisperModel: localStorage.getItem('batchedit-whisper-model') || 'onnx-community/whisper-base.en_timestamped',
+  whisperModel: localStorage.getItem('batchedit-whisper-model') || 'onnx-community/whisper-large-v3-turbo_timestamped',
   setWhisperModel: (model) => {
     localStorage.setItem('batchedit-whisper-model', model)
     set({ whisperModel: model })
@@ -343,6 +355,24 @@ export const useStore = create<AppState>((set, get) => ({
     const { hooks, meats, ctas } = get()
     if (hooks.length === 0 || meats.length === 0 || ctas.length === 0) return 0
     return hooks.length * meats.length * ctas.length
+  },
+
+  getCombos: () => {
+    const { hooks, meats, ctas } = get()
+    const combos: Combo[] = []
+    for (const hook of hooks) {
+      for (const meat of meats) {
+        for (const cta of ctas) {
+          combos.push({
+            id: `${hook.id}__${meat.id}__${cta.id}`,
+            hook,
+            meat,
+            cta
+          })
+        }
+      }
+    }
+    return combos
   },
 
   saveProject: async () => {

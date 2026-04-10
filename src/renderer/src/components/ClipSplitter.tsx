@@ -36,8 +36,18 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
+import { Stepper } from '@/components/ui/stepper'
 
 type Step = 'upload' | 'transcribing' | 'review' | 'splitting' | 'done'
+
+const STEP_LABELS = ['Upload', 'Transcribe', 'Review', 'Split', 'Done']
+const STEP_INDEX: Record<Step, number> = {
+  upload: 0,
+  transcribing: 1,
+  review: 2,
+  splitting: 3,
+  done: 4
+}
 
 const BUCKET_COLORS: Record<BucketType, string> = {
   hook: 'bg-blue-500',
@@ -176,10 +186,10 @@ export function ClipSplitter() {
       const wavPath = await window.api.extractAudio(path)
       const audioBuffer = await window.api.readAudioBuffer(wavPath)
       const audioData = new Float32Array(audioBuffer)
-      const chunks = await transcribe(audioData, whisperModel)
+      const { chunks, speechIntervals } = await transcribe(audioData, whisperModel)
       setWordChunks(chunks)
 
-      const detected = detectMarkers(chunks, duration)
+      const detected = detectMarkers(chunks, duration, speechIntervals)
       setMarkers(detected)
       setStep('review')
     } catch (err) {
@@ -388,6 +398,10 @@ export function ClipSplitter() {
             Clip Splitter
           </DialogTitle>
         </DialogHeader>
+
+        <div className="px-2 pt-1 pb-3">
+          <Stepper steps={STEP_LABELS} current={STEP_INDEX[step]} />
+        </div>
 
         {error && (
           <div className="bg-destructive/10 text-destructive text-sm px-3 py-2 rounded-md">
