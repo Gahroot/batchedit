@@ -23,10 +23,20 @@ export interface ProjectSettings {
   outputDirectory: string | null
 }
 
+export type RenderProgressStatus =
+  | 'queued'
+  | 'normalizing'
+  | 'concatenating'
+  | 'overlaying'
+  | 'rendering'
+  | 'done'
+  | 'error'
+  | 'canceled'
+
 export interface RenderProgress {
   jobId: string
   percent: number
-  status: 'queued' | 'normalizing' | 'rendering' | 'done' | 'error'
+  status: RenderProgressStatus
   error?: string
 }
 

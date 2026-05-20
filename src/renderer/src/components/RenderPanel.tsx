@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, Loader2, Captions, Crop, Scissors, Brain } from 'lucide-react'
+import { Play, Loader2, Captions, Crop, Scissors, Brain, Square } from 'lucide-react'
 import { useStore, RenderProgress } from '../store'
 import { useWhisper } from '@/hooks/useWhisper'
 import { WhisperStatus } from './WhisperStatus'
@@ -59,6 +59,7 @@ export function RenderPanel() {
   const [autoCaptions, setAutoCaptions] = useState(false)
   const [autoResize, setAutoResize] = useState(false)
   const [showProgress, setShowProgress] = useState(false)
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(null)
 
   // Listen for render progress updates
   useEffect(() => {
@@ -142,13 +143,16 @@ export function RenderPanel() {
             totalClips: uniquePaths.length
           })
 
+          let wavPath: string | null = null
           try {
-            const wavPath = await window.api.extractAudio(clipPath)
+            wavPath = await window.api.extractAudio(clipPath)
             const audioBuffer = await window.api.readAudioBuffer(wavPath)
+            wavPath = null
             const audioData = new Float32Array(audioBuffer)
             const { chunks } = await transcribe(audioData, whisperModel)
             transcriptionCache[clipPath] = chunks
           } catch (err) {
+            if (wavPath) await window.api.releaseTempFile(wavPath)
             const msg = err instanceof Error ? err.message : String(err)
             console.error(`Transcription failed for ${clipName}:`, err)
             addError({ source: 'caption', clipName, message: msg })
@@ -226,18 +230,35 @@ export function RenderPanel() {
       })
     )
 
+    const batchId = jobs[0]?.id ?? null
+    setActiveBatchId(batchId)
     setCaptionProgress(null)
     setJobIdToComboId(jobMap)
 
+    let returnedProgress: RenderProgress[] | null = null
     try {
-      await window.api.renderBatch(jobs)
+      returnedProgress = await window.api.renderBatch(jobs)
+      setRenderProgress(returnedProgress)
     } catch (err) {
       console.error('Render failed:', err)
+      const message = err instanceof Error ? err.message : String(err)
+      for (const job of jobs) {
+        addError({
+          source: 'render',
+          clipName: job.outputPath.split(/[/\\]/).pop() || job.id,
+          message
+        })
+      }
     } finally {
-      // Log any errored render jobs
-      const finalProgress = useStore.getState().renderProgress
+      // Log any errored render jobs from the returned IPC result to avoid stale progress races.
+      const finalProgress = returnedProgress ?? useStore.getState().renderProgress
       let errorCount = 0
+      let canceledCount = 0
       for (const rp of finalProgress) {
+        if (rp.status === 'canceled') {
+          canceledCount++
+          continue
+        }
         if (rp.status === 'error') {
           errorCount++
           const job = jobs.find((j) => j.id === rp.jobId)
@@ -254,7 +275,9 @@ export function RenderPanel() {
 
       const doneCount = finalProgress.filter((r) => r.status === 'done').length
       const totalJobs = finalProgress.length
-      if (totalJobs > 0 && errorCount === 0) {
+      if (totalJobs > 0 && canceledCount > 0) {
+        toast.info(`Canceled ${canceledCount} render${canceledCount === 1 ? '' : 's'}`)
+      } else if (totalJobs > 0 && errorCount === 0) {
         toast.success(`${doneCount} video${doneCount === 1 ? '' : 's'} rendered`)
         confetti({
           particleCount: 120,
@@ -266,12 +289,14 @@ export function RenderPanel() {
         toast.error(`${errorCount} of ${totalJobs} render${totalJobs === 1 ? '' : 's'} failed`)
       }
 
+      setActiveBatchId(null)
       setIsRendering(false)
     }
   }
 
   const completed = renderProgress.filter((r) => r.status === 'done').length
   const errors = renderProgress.filter((r) => r.status === 'error').length
+  const canceled = renderProgress.filter((r) => r.status === 'canceled').length
   const total = renderProgress.length
   const overallPercent =
     total > 0
@@ -279,6 +304,13 @@ export function RenderPanel() {
       : 0
 
   const canRender = totalCombos > 0 && settings.outputDirectory && !isRendering
+
+  const handleCancelRender = async () => {
+    const didCancel = await window.api.cancelRender(activeBatchId ?? undefined)
+    if (didCancel) {
+      toast.info('Canceling render...')
+    }
+  }
 
   // Build render count options
   const renderCountOptions = [1, 5, 10, 25, 50, 100].filter((n) => n <= totalCombos)
@@ -304,6 +336,11 @@ export function RenderPanel() {
                 {errors > 0 && (
                   <Badge variant="destructive" className="font-mono">
                     <NumberTicker value={errors} /> err
+                  </Badge>
+                )}
+                {canceled > 0 && (
+                  <Badge variant="outline" className="font-mono">
+                    <NumberTicker value={canceled} /> canceled
                   </Badge>
                 )}
               </div>
@@ -450,6 +487,12 @@ export function RenderPanel() {
                   Render {renderCount === 'all' ? totalCombos : renderCount} Videos
                 </>
               )}
+            </Button>
+          )}
+          {isRendering && (
+            <Button size="lg" variant="destructive" onClick={handleCancelRender}>
+              <Square className="w-4 h-4" />
+              Cancel
             </Button>
           )}
         </div>

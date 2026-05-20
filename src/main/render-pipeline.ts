@@ -1,4 +1,5 @@
 import { ipcMain, app } from 'electron'
+import ffmpegModule from 'fluent-ffmpeg'
 import { ffmpeg, getVideoMetadata, extractAudio, trimVideo, trimVideoReencode, detectLeadingSilence, trimLeadingSilence, getEncoder, getSoftwareEncoder, isGpuSessionError } from './ffmpeg'
 import { join, normalize } from 'path'
 import { writeFileSync, mkdirSync, unlinkSync, readFileSync, existsSync, statSync } from 'fs'
@@ -13,17 +14,48 @@ function getFontsDir(): string {
   return join(app.getAppPath(), 'resources', 'fonts')
 }
 
-/** Escape a file path for use inside an FFmpeg -filter_complex option value.
- *  Needs DOUBLE backslash escaping: the filter graph parser consumes one level,
- *  then the filter option parser consumes the second.
- *  Ref: github.com/ddean2009/MoneyPrinterPlus (confirmed working on Windows) */
-function escapeFilterPath(p: string): string {
+const FFMPEG_UNSUPPORTED_PATH_CONTROL_CHARS = /[\r\n]/
+const trackedTempFiles = new Set<string>()
+
+export function trackTempFile(filePath: string): string {
+  trackedTempFiles.add(filePath)
+  return filePath
+}
+
+export function releaseTempFile(filePath: string): void {
+  trackedTempFiles.delete(filePath)
+  try { unlinkSync(filePath) } catch {}
+}
+
+export function clearTrackedTempFiles(): void {
+  for (const filePath of trackedTempFiles) {
+    try { unlinkSync(filePath) } catch {}
+  }
+  trackedTempFiles.clear()
+}
+
+export function getTrackedTempFileCount(): number {
+  return trackedTempFiles.size
+}
+
+function assertNoFfmpegPathLineBreaks(pathValue: string, context: string): void {
+  if (FFMPEG_UNSUPPORTED_PATH_CONTROL_CHARS.test(pathValue)) {
+    throw new Error(`${context} cannot contain line breaks`)
+  }
+}
+
+/**
+ * Escape a file path for use inside an FFmpeg -filter_complex option value.
+ * fluent-ffmpeg passes filter_complex as one argv entry, so shell escaping is not needed;
+ * FFmpeg still parses the filter graph and then the filter option value. Escaping each
+ * metacharacter twice leaves one escape for the option parser after graph parsing.
+ */
+export function escapeFilterPath(p: string): string {
+  assertNoFfmpegPathLineBreaks(p, 'FFmpeg filter path')
+
   return p
-    .replace(/\\/g, '/')        // normalize Windows backslashes to forward slashes
-    .replace(/:/g, '\\\\:')     // double-escape colons (C: → C\\:)
-    .replace(/'/g, "\\\\'")     // double-escape single quotes
-    .replace(/\[/g, '\\\\[')    // double-escape open brackets
-    .replace(/\]/g, '\\\\]')    // double-escape close brackets
+    .replace(/\\/g, '/')
+    .replace(/([\\':,;\[\]])/g, '\\\\$1')
 }
 
 function cssHexToAssBgr(hex: string): string {
@@ -66,12 +98,27 @@ interface FullCaptionStyle {
   animation: 'karaoke-fill' | 'word-pop' | 'fade-in' | 'glow'
 }
 
+type CaptionAnimation = FullCaptionStyle['animation']
+
 const DEFAULT_STYLE: FullCaptionStyle = {
   fontName: 'Inter', fontFile: 'Inter-Bold.ttf',
   fontSize: 0.05, primaryColor: '#FFFFFF', highlightColor: '#FFFF00',
   outlineColor: '#000000', backColor: '#80000000',
   outline: 3, shadow: 1, borderStyle: 1, wordsPerLine: 4, animation: 'karaoke-fill'
 }
+
+const MAX_WORDS_PER_LINE = 12
+const MAX_ASS_TEXT_LENGTH = 200
+const MAX_SEGMENT_DURATION_MS = 12 * 60 * 60 * 1000
+const SAFE_FONT_NAME_PATTERN = /^[\p{L}\p{N} ._-]+$/u
+const SAFE_FONT_FILE_PATTERN = /^[\p{L}\p{N} ._-]+\.(?:ttf|otf)$/iu
+const CSS_HEX_COLOR_PATTERN = /^#(?:[\da-f]{6}|[\da-f]{8})$/i
+const CAPTION_ANIMATIONS: ReadonlySet<CaptionAnimation> = new Set([
+  'karaoke-fill',
+  'word-pop',
+  'fade-in',
+  'glow'
+])
 
 function buildAssHeader(width: number, height: number, styleLines: string[]): string {
   return `[Script Info]
@@ -112,11 +159,110 @@ export interface RenderJob {
   }
 }
 
+export type RenderProgressStatus =
+  | 'queued'
+  | 'normalizing'
+  | 'concatenating'
+  | 'overlaying'
+  | 'rendering'
+  | 'done'
+  | 'error'
+  | 'canceled'
+
 export interface RenderProgress {
   jobId: string
   percent: number
-  status: 'queued' | 'normalizing' | 'rendering' | 'done' | 'error'
+  status: RenderProgressStatus
   error?: string
+}
+
+type FfmpegCommand = ffmpegModule.FfmpegCommand
+
+type RenderProgressPhase = 'concat' | 'overlay'
+
+const PROGRESS_EVENT_THROTTLE_MS = 200
+
+function clampProgressPercent(percent: number): number {
+  if (!Number.isFinite(percent)) return 0
+  return Math.max(0, Math.min(100, percent))
+}
+
+function createProgressSender(
+  sender: Electron.WebContents,
+  results: RenderProgress[]
+): (options?: { force?: boolean }) => void {
+  let lastSentAt = 0
+  return ({ force = false } = {}) => {
+    const now = Date.now()
+    if (!force && now - lastSentAt < PROGRESS_EVENT_THROTTLE_MS) return
+    lastSentAt = now
+    sender.send('render:progress', results.map((result) => ({ ...result })))
+  }
+}
+
+function mapPhaseProgress(phase: RenderProgressPhase, percent: number): number {
+  const safePercent = clampProgressPercent(percent)
+  if (phase === 'concat') return Math.round(safePercent * 0.2)
+  return Math.round(20 + safePercent * 0.8)
+}
+
+interface RenderCancellationState {
+  isCanceled: boolean
+  commands: Set<FfmpegCommand>
+}
+
+const activeRenderBatches = new Map<string, RenderCancellationState>()
+
+class RenderCanceledError extends Error {
+  constructor() {
+    super('Render canceled')
+    this.name = 'RenderCanceledError'
+  }
+}
+
+function createCancellationState(batchId: string): RenderCancellationState {
+  const state = { isCanceled: false, commands: new Set<FfmpegCommand>() }
+  activeRenderBatches.set(batchId, state)
+  return state
+}
+
+function registerFfmpegCommand(command: FfmpegCommand, cancellation: RenderCancellationState): FfmpegCommand {
+  cancellation.commands.add(command)
+  if (cancellation.isCanceled) {
+    command.kill('SIGTERM')
+  }
+  return command
+}
+
+function unregisterFfmpegCommand(command: FfmpegCommand, cancellation: RenderCancellationState): void {
+  cancellation.commands.delete(command)
+}
+
+function throwIfCanceled(cancellation: RenderCancellationState): void {
+  if (cancellation.isCanceled) {
+    throw new RenderCanceledError()
+  }
+}
+
+function toRenderError(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err))
+}
+
+export function cancelActiveRenderBatch(batchId?: string): boolean {
+  const batches = batchId
+    ? [...activeRenderBatches.entries()].filter(([id]) => id === batchId)
+    : [...activeRenderBatches.entries()]
+
+  let canceled = false
+  for (const [, state] of batches) {
+    state.isCanceled = true
+    canceled = true
+    for (const command of state.commands) {
+      try { command.kill('SIGTERM') } catch {}
+    }
+  }
+  clearTrackedTempFiles()
+  return canceled
 }
 
 /** Check if a job needs overlays/captions/text (the "slow path") */
@@ -128,7 +274,9 @@ function jobNeedsOverlays(job: RenderJob): boolean {
 }
 
 /** Escape a path for use in ffconcat list files (single-quote wrapping, escape inner quotes) */
-function escapeConcatPath(p: string): string {
+export function escapeConcatPath(p: string): string {
+  assertNoFfmpegPathLineBreaks(p, 'FFmpeg concat path')
+
   return p.replace(/\\/g, '/').replace(/'/g, "'\\''")
 }
 
@@ -168,8 +316,10 @@ export function clearNormalizedCache(): void {
 async function preNormalizeClip(
   clipPath: string,
   resolution: { width: number; height: number },
-  autoResize: boolean
+  autoResize: boolean,
+  cancellation: RenderCancellationState
 ): Promise<string> {
+  throwIfCanceled(cancellation)
   const { width, height } = resolution
 
   // Check disk cache first
@@ -200,7 +350,8 @@ async function preNormalizeClip(
 
   function encodeWithConfig(encoderConfig: { encoder: string; presetFlag: string[] }): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      ffmpeg(normalize(clipPath))
+      const command = registerFfmpegCommand(ffmpeg(normalize(clipPath)), cancellation)
+      command
         .videoFilters(scaleFilter)
         .outputOptions([
           '-y',
@@ -210,10 +361,17 @@ async function preNormalizeClip(
         ])
         .on('start', (cmd) => console.log(`[Normalize] ${cmd}`))
         .on('end', () => {
+          unregisterFfmpegCommand(command, cancellation)
           normalizedClipCache.set(cacheKey, outPath)
           resolve(outPath)
         })
         .on('error', (err, _stdout, stderr) => {
+          unregisterFfmpegCommand(command, cancellation)
+          try { unlinkSync(outPath) } catch {}
+          if (cancellation.isCanceled) {
+            reject(new RenderCanceledError())
+            return
+          }
           if (stderr) console.error(`[Normalize] stderr:\n${stderr}`)
           reject(new Error(stderr ? `${err.message}\nFFmpeg output:\n${stderr}` : err.message))
         })
@@ -240,7 +398,8 @@ async function preNormalizeAllClips(
   clipPaths: string[],
   resolution: { width: number; height: number },
   autoResize: boolean,
-  onProgress: (completed: number, total: number) => void
+  onProgress: (completed: number, total: number) => void,
+  cancellation: RenderCancellationState
 ): Promise<Map<string, string>> {
   const uniquePaths = [...new Set(clipPaths)]
   const result = new Map<string, string>()
@@ -248,10 +407,11 @@ async function preNormalizeAllClips(
   const queue = [...uniquePaths]
 
   async function processNext(): Promise<void> {
+    throwIfCanceled(cancellation)
     const clipPath = queue.shift()
     if (!clipPath) return
 
-    const normalized = await preNormalizeClip(clipPath, resolution, autoResize)
+    const normalized = await preNormalizeClip(clipPath, resolution, autoResize, cancellation)
     result.set(clipPath, normalized)
     completed++
     onProgress(completed, uniquePaths.length)
@@ -274,17 +434,19 @@ async function preNormalizeAllClips(
 function concatStreamCopy(
   clipPaths: string[],
   outputPath: string,
-  onProgress: (percent: number) => void
+  onProgress: (percent: number) => void,
+  cancellation: RenderCancellationState
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     // Write concat list file
     const listContent = clipPaths
       .map((p) => `file '${escapeConcatPath(p)}'`)
       .join('\n')
-    const listPath = join(tmpdir(), `batchedit-concat-${uuidv4()}.txt`)
+    const listPath = trackTempFile(join(tmpdir(), `batchedit-concat-${uuidv4()}.txt`))
     writeFileSync(listPath, listContent, 'utf-8')
 
-    ffmpeg()
+    const command = registerFfmpegCommand(ffmpeg(), cancellation)
+    command
       .input(listPath)
       .inputOptions(['-f', 'concat', '-safe', '0'])
       .outputOptions([
@@ -295,12 +457,19 @@ function concatStreamCopy(
       .on('start', (cmd) => console.log(`[FFmpeg concat-copy] ${cmd}`))
       .on('progress', (progress) => onProgress(progress.percent || 0))
       .on('end', () => {
-        try { unlinkSync(listPath) } catch {}
+        unregisterFfmpegCommand(command, cancellation)
+        releaseTempFile(listPath)
         resolve()
       })
       .on('error', (err, _stdout, stderr) => {
+        unregisterFfmpegCommand(command, cancellation)
+        releaseTempFile(listPath)
+        try { unlinkSync(outputPath) } catch {}
+        if (cancellation.isCanceled) {
+          reject(new RenderCanceledError())
+          return
+        }
         if (stderr) console.error(`[FFmpeg concat-copy] stderr:\n${stderr}`)
-        try { unlinkSync(listPath) } catch {}
         reject(new Error(stderr ? `${err.message}\nFFmpeg output:\n${stderr}` : err.message))
       })
       .save(normalize(outputPath))
@@ -314,42 +483,55 @@ function concatStreamCopy(
 function concatWithOverlays(
   job: RenderJob,
   normalizedPaths: string[],
-  onProgress: (percent: number) => void
+  onProgress: (phase: RenderProgressPhase, percent: number) => void,
+  cancellation: RenderCancellationState
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const outputPath = normalize(job.outputPath)
 
     // Step 1: concat via stream copy into a temp file
-    const tempConcat = join(tmpdir(), `batchedit-tempconcat-${uuidv4()}.mp4`)
+    const tempConcat = trackTempFile(join(tmpdir(), `batchedit-tempconcat-${uuidv4()}.mp4`))
     const listContent = normalizedPaths
       .map((p) => `file '${escapeConcatPath(p)}'`)
       .join('\n')
-    const listPath = join(tmpdir(), `batchedit-concat-${uuidv4()}.txt`)
+    const listPath = trackTempFile(join(tmpdir(), `batchedit-concat-${uuidv4()}.txt`))
     writeFileSync(listPath, listContent, 'utf-8')
 
-    const concatCmd = ffmpeg()
-      .input(listPath)
-      .inputOptions(['-f', 'concat', '-safe', '0'])
-      .outputOptions(['-y', '-c', 'copy', '-movflags', '+faststart'])
+    const concatCmd = registerFfmpegCommand(
+      ffmpeg()
+        .input(listPath)
+        .inputOptions(['-f', 'concat', '-safe', '0'])
+        .outputOptions(['-y', '-c', 'copy', '-movflags', '+faststart']),
+      cancellation
+    )
 
     concatCmd
       .on('start', (cmd) => console.log(`[FFmpeg concat-step] ${cmd}`))
+      .on('progress', (progress) => onProgress('concat', progress.percent || 0))
       .on('end', () => {
-        try { unlinkSync(listPath) } catch {}
+        unregisterFfmpegCommand(concatCmd, cancellation)
+        releaseTempFile(listPath)
         // Step 2: apply overlays/captions on the concatenated file
-        applyOverlays(job, tempConcat, outputPath, onProgress)
+        applyOverlays(job, tempConcat, outputPath, onProgress, cancellation)
           .then(() => {
-            try { unlinkSync(tempConcat) } catch {}
+            releaseTempFile(tempConcat)
             resolve()
           })
           .catch((err) => {
-            try { unlinkSync(tempConcat) } catch {}
+            releaseTempFile(tempConcat)
             reject(err)
           })
       })
       .on('error', (err, _stdout, stderr) => {
+        unregisterFfmpegCommand(concatCmd, cancellation)
+        releaseTempFile(listPath)
+        releaseTempFile(tempConcat)
+        try { unlinkSync(outputPath) } catch {}
+        if (cancellation.isCanceled) {
+          reject(new RenderCanceledError())
+          return
+        }
         if (stderr) console.error(`[FFmpeg concat-step] stderr:\n${stderr}`)
-        try { unlinkSync(listPath) } catch {}
         reject(new Error(stderr ? `${err.message}\nFFmpeg output:\n${stderr}` : err.message))
       })
       .save(tempConcat)
@@ -378,12 +560,12 @@ function buildOverlayFilterGraph(
       job.resolution,
       job.titlePosition
     )
-    const assPath = join(tmpdir(), `batchedit-textoverlay-${uuidv4()}.ass`)
+    const assPath = trackTempFile(join(tmpdir(), `batchedit-textoverlay-${uuidv4()}.ass`))
     writeFileSync(assPath, assContent, 'utf-8')
     tempAssFiles.push(assPath)
 
     const escaped = escapeFilterPath(assPath)
-    filters.push(`${currentLabel}ass=${escaped}[vtxt]`)
+    filters.push(`${currentLabel}ass=filename=${escaped}[vtxt]`)
     currentLabel = '[vtxt]'
   }
 
@@ -419,7 +601,7 @@ function buildOverlayFilterGraph(
   if (job.captionsAssPath) {
     const escaped = escapeFilterPath(job.captionsAssPath)
     const fontsDir = escapeFilterPath(getFontsDir())
-    filters.push(`${currentLabel}ass=${escaped}:fontsdir=${fontsDir}[vfinal]`)
+    filters.push(`${currentLabel}ass=filename=${escaped}:fontsdir=${fontsDir}[vfinal]`)
     currentLabel = '[vfinal]'
   }
 
@@ -436,10 +618,11 @@ function runOverlayEncode(
   extraInputPaths: string[],
   finalVideoLabel: string,
   encoderConfig: { encoder: string; presetFlag: string[] },
-  onProgress: (percent: number) => void
+  onProgress: (percent: number) => void,
+  cancellation: RenderCancellationState
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const command = ffmpeg().input(inputPath)
+    const command = registerFfmpegCommand(ffmpeg().input(inputPath), cancellation)
     for (const imgPath of extraInputPaths) {
       command.input(imgPath)
     }
@@ -455,8 +638,17 @@ function runOverlayEncode(
       ])
       .on('start', (cmd) => console.log(`[FFmpeg overlay] ${cmd}`))
       .on('progress', (progress) => onProgress(progress.percent || 0))
-      .on('end', () => resolve())
+      .on('end', () => {
+        unregisterFfmpegCommand(command, cancellation)
+        resolve()
+      })
       .on('error', (err, _stdout, stderr) => {
+        unregisterFfmpegCommand(command, cancellation)
+        try { unlinkSync(outputPath) } catch {}
+        if (cancellation.isCanceled) {
+          reject(new RenderCanceledError())
+          return
+        }
         if (stderr) console.error(`[FFmpeg overlay] stderr:\n${stderr}`)
         reject(new Error(stderr ? `${err.message}\nFFmpeg output:\n${stderr}` : err.message))
       })
@@ -472,24 +664,25 @@ async function applyOverlays(
   job: RenderJob,
   inputPath: string,
   outputPath: string,
-  onProgress: (percent: number) => void
+  onProgress: (phase: RenderProgressPhase, percent: number) => void,
+  cancellation: RenderCancellationState
 ): Promise<void> {
   const tempAssFiles: string[] = []
   const { filters, extraInputPaths, finalVideoLabel } = buildOverlayFilterGraph(job, tempAssFiles)
 
   const cleanup = (): void => {
-    tempAssFiles.forEach((f) => { try { unlinkSync(f) } catch {} })
+    tempAssFiles.forEach(releaseTempFile)
   }
 
   try {
-    await runOverlayEncode(inputPath, outputPath, filters, extraInputPaths, finalVideoLabel, getEncoder(), onProgress)
+    await runOverlayEncode(inputPath, outputPath, filters, extraInputPaths, finalVideoLabel, getEncoder(), (percent) => onProgress('overlay', percent), cancellation)
     cleanup()
   } catch (err: any) {
     // If GPU encoder ran out of sessions, retry with software encoder
     if (isGpuSessionError(err.message)) {
       console.log(`[FFmpeg overlay] GPU session exhausted, retrying with libx264`)
       try {
-        await runOverlayEncode(inputPath, outputPath, filters, extraInputPaths, finalVideoLabel, getSoftwareEncoder(), onProgress)
+        await runOverlayEncode(inputPath, outputPath, filters, extraInputPaths, finalVideoLabel, getSoftwareEncoder(), (percent) => onProgress('overlay', percent), cancellation)
         cleanup()
       } catch (retryErr: any) {
         cleanup()
@@ -541,8 +734,13 @@ export function setupRenderPipeline(): void {
   ipcMain.handle(
     'ffmpeg:extractAudio',
     async (_event, videoPath: string) => {
-      const tmpPath = join(tmpdir(), `batchedit-audio-${uuidv4()}.wav`)
-      return extractAudio(videoPath, tmpPath)
+      const tmpPath = trackTempFile(join(tmpdir(), `batchedit-audio-${uuidv4()}.wav`))
+      try {
+        return await extractAudio(videoPath, tmpPath)
+      } catch (err) {
+        releaseTempFile(tmpPath)
+        throw err
+      }
     }
   )
 
@@ -555,7 +753,7 @@ export function setupRenderPipeline(): void {
       resolution: { width: number; height: number }
     ) => {
       const assContent = generateAssFile(captions, resolution)
-      const tmpPath = join(tmpdir(), `batchedit-subs-${uuidv4()}.ass`)
+      const tmpPath = trackTempFile(join(tmpdir(), `batchedit-subs-${uuidv4()}.ass`))
       writeFileSync(tmpPath, assContent, 'utf-8')
       return tmpPath
     }
@@ -578,7 +776,7 @@ export function setupRenderPipeline(): void {
       }
     ) => {
       const assContent = generateCombinedAssFile(data.segments, data.resolution, data.captionStyle, data.captionPosition)
-      const tmpPath = join(tmpdir(), `batchedit-karaoke-${uuidv4()}.ass`)
+      const tmpPath = trackTempFile(join(tmpdir(), `batchedit-karaoke-${uuidv4()}.ass`))
       writeFileSync(tmpPath, assContent, 'utf-8')
       return tmpPath
     }
@@ -586,8 +784,16 @@ export function setupRenderPipeline(): void {
 
   // Read WAV file and return PCM Float32Array for Whisper
   ipcMain.handle('ffmpeg:readAudioBuffer', async (_event, wavPath: string) => {
-    const buffer = readFileSync(wavPath)
-    return parseWavToFloat32(buffer).buffer
+    try {
+      const buffer = readFileSync(wavPath)
+      return parseWavToFloat32(buffer).buffer
+    } finally {
+      releaseTempFile(wavPath)
+    }
+  })
+
+  ipcMain.handle('ffmpeg:releaseTempFile', async (_event, filePath: string) => {
+    releaseTempFile(filePath)
   })
 
   // Split video into segments
@@ -678,15 +884,22 @@ export function setupRenderPipeline(): void {
     })
   })
 
+  ipcMain.handle('render:cancel', async (_event, batchId?: string) => {
+    return cancelActiveRenderBatch(batchId)
+  })
+
   // Batch render
   ipcMain.handle(
     'render:batch',
     async (event, jobs: RenderJob[]) => {
+      const batchId = jobs[0]?.id ?? uuidv4()
+      const cancellation = createCancellationState(batchId)
       const results: RenderProgress[] = jobs.map((j) => ({
         jobId: j.id,
         percent: 0,
         status: 'queued' as const
       }))
+      const sendProgress = createProgressSender(event.sender, results)
 
       // Create output directory
       if (jobs.length > 0) {
@@ -697,7 +910,7 @@ export function setupRenderPipeline(): void {
       // --- Phase 1: Pre-normalize all unique clips ---
       // Mark all jobs as normalizing
       for (const r of results) r.status = 'normalizing'
-      event.sender.send('render:progress', results)
+      sendProgress({ force: true })
 
       // Collect all unique clip paths and determine autoResize from first job
       const allClipPaths: string[] = []
@@ -718,32 +931,43 @@ export function setupRenderPipeline(): void {
             for (const r of results) {
               if (r.status === 'normalizing') r.percent = pct
             }
-            event.sender.send('render:progress', results)
-          }
+            sendProgress()
+          },
+          cancellation
         )
-      } catch (err: any) {
-        // If normalization fails, fail all jobs
+      } catch (err: unknown) {
+        const error = toRenderError(err)
         for (const r of results) {
-          r.status = 'error'
-          r.error = `Normalization failed: ${err.message}`
+          if (error instanceof RenderCanceledError || cancellation.isCanceled) {
+            r.status = 'canceled'
+            r.error = 'Render canceled'
+          } else {
+            r.status = 'error'
+            r.error = `Normalization failed: ${error.message}`
+          }
         }
-        event.sender.send('render:progress', results)
+        sendProgress({ force: true })
+        activeRenderBatches.delete(batchId)
+        clearTrackedTempFiles()
         return results
       }
 
       // --- Phase 1.5: Probe normalized durations, fix overlay timing, generate ASS ---
       const probedDurations = new Map<string, number>()
-      for (const [originalPath, normalizedPath] of normalizedMap.entries()) {
-        try {
-          const meta = await getVideoMetadata(normalizedPath)
-          probedDurations.set(originalPath, meta.duration)
-        } catch {
-          // Fall back — leave duration unset, job will use original values
+      try {
+        throwIfCanceled(cancellation)
+        for (const [originalPath, normalizedPath] of normalizedMap.entries()) {
+          try {
+            const meta = await getVideoMetadata(normalizedPath)
+            probedDurations.set(originalPath, meta.duration)
+          } catch {
+            // Fall back — leave duration unset, job will use original values
+          }
         }
-      }
 
-      for (const job of jobs) {
-        // Fix overlay timing with probed durations
+        for (const job of jobs) {
+          throwIfCanceled(cancellation)
+          // Fix overlay timing with probed durations
         const probedHookDur = probedDurations.get(job.hookPath)
         const probedMeatDur = probedDurations.get(job.meatPath)
         if (probedHookDur !== undefined && job.hookDurationSec !== undefined) {
@@ -754,24 +978,38 @@ export function setupRenderPipeline(): void {
         }
 
         // Generate ASS for jobs with captionData
-        if (job.captionData) {
-          const cd = job.captionData
-          const hookDurMs = (probedHookDur ?? job.hookDurationSec ?? 0) * 1000
-          const meatDurMs = (probedMeatDur ?? job.meatDurationSec ?? 0) * 1000
-          const ctaDurMs = (probedDurations.get(job.ctaPath) ?? 0) * 1000
-          const offsetMs = cd.captionOffsetMs ?? 0
+          if (job.captionData) {
+            const cd = job.captionData
+            const hookDurMs = (probedHookDur ?? job.hookDurationSec ?? 0) * 1000
+            const meatDurMs = (probedMeatDur ?? job.meatDurationSec ?? 0) * 1000
+            const ctaDurMs = (probedDurations.get(job.ctaPath) ?? 0) * 1000
+            const offsetMs = cd.captionOffsetMs ?? 0
 
-          const segments = [
-            { wordChunks: cd.clipWordChunks[job.hookPath] || [], offsetMs: 0 + offsetMs, durationMs: hookDurMs },
-            { wordChunks: cd.clipWordChunks[job.meatPath] || [], offsetMs: hookDurMs + offsetMs, durationMs: meatDurMs },
-            { wordChunks: cd.clipWordChunks[job.ctaPath] || [], offsetMs: hookDurMs + meatDurMs + offsetMs, durationMs: ctaDurMs }
-          ]
+            const segments = [
+              { wordChunks: cd.clipWordChunks[job.hookPath] || [], offsetMs: 0 + offsetMs, durationMs: hookDurMs },
+              { wordChunks: cd.clipWordChunks[job.meatPath] || [], offsetMs: hookDurMs + offsetMs, durationMs: meatDurMs },
+              { wordChunks: cd.clipWordChunks[job.ctaPath] || [], offsetMs: hookDurMs + meatDurMs + offsetMs, durationMs: ctaDurMs }
+            ]
 
-          const assContent = generateCombinedAssFile(segments, job.resolution, cd.captionStyle, cd.captionPosition)
-          const assPath = join(tmpdir(), `batchedit-karaoke-${uuidv4()}.ass`)
-          writeFileSync(assPath, assContent, 'utf-8')
-          job.captionsAssPath = assPath
+            const assContent = generateCombinedAssFile(segments, job.resolution, cd.captionStyle, cd.captionPosition)
+            const assPath = trackTempFile(join(tmpdir(), `batchedit-karaoke-${uuidv4()}.ass`))
+            writeFileSync(assPath, assContent, 'utf-8')
+            job.captionsAssPath = assPath
+          }
         }
+      } catch (err: unknown) {
+        const error = toRenderError(err)
+        if (!(error instanceof RenderCanceledError) && !cancellation.isCanceled) {
+          throw error
+        }
+        for (const r of results) {
+          r.status = 'canceled'
+          r.error = 'Render canceled'
+        }
+        sendProgress({ force: true })
+        activeRenderBatches.delete(batchId)
+        clearTrackedTempFiles()
+        return results
       }
 
       // Reset progress for rendering phase
@@ -779,7 +1017,7 @@ export function setupRenderPipeline(): void {
         r.status = 'queued'
         r.percent = 0
       }
-      event.sender.send('render:progress', results)
+      sendProgress({ force: true })
 
       // --- Phase 2: Render each combination ---
       // Split into fast (stream copy, I/O bound) and slow (encoding) queues
@@ -789,7 +1027,7 @@ export function setupRenderPipeline(): void {
       async function renderJob(job: RenderJob): Promise<void> {
         const idx = jobs.findIndex((j) => j.id === job.id)
         results[idx].status = 'rendering'
-        event.sender.send('render:progress', results)
+        sendProgress({ force: true })
 
         try {
           const normHook = normalizedMap.get(job.hookPath) || job.hookPath
@@ -797,58 +1035,100 @@ export function setupRenderPipeline(): void {
           const normCta = normalizedMap.get(job.ctaPath) || job.ctaPath
           const normalizedPaths = [normHook, normMeat, normCta]
 
+          throwIfCanceled(cancellation)
           if (jobNeedsOverlays(job)) {
-            await concatWithOverlays(job, normalizedPaths, (percent) => {
-              results[idx].percent = percent
-              event.sender.send('render:progress', results)
-            })
+            await concatWithOverlays(job, normalizedPaths, (phase, percent) => {
+              results[idx].status = phase === 'concat' ? 'concatenating' : 'overlaying'
+              results[idx].percent = mapPhaseProgress(phase, percent)
+              sendProgress()
+            }, cancellation)
           } else {
             await concatStreamCopy(normalizedPaths, job.outputPath, (percent) => {
-              results[idx].percent = percent
-              event.sender.send('render:progress', results)
-            })
+              results[idx].status = 'concatenating'
+              results[idx].percent = clampProgressPercent(percent)
+              sendProgress()
+            }, cancellation)
           }
 
           results[idx].status = 'done'
           results[idx].percent = 100
-        } catch (err: any) {
-          results[idx].status = 'error'
-          results[idx].error = err.message
+        } catch (err: unknown) {
+          const error = toRenderError(err)
+          if (error instanceof RenderCanceledError || cancellation.isCanceled) {
+            results[idx].status = 'canceled'
+            results[idx].error = 'Render canceled'
+            try { unlinkSync(job.outputPath) } catch {}
+          } else {
+            results[idx].status = 'error'
+            results[idx].error = error.message
+          }
         }
 
-        event.sender.send('render:progress', results)
+        sendProgress({ force: true })
       }
 
-      // Process fast jobs first (I/O bound — higher concurrency)
-      if (fastQueue.length > 0) {
-        const fastJobQueue = [...fastQueue]
-        async function processFast(): Promise<void> {
-          const job = fastJobQueue.shift()
-          if (!job) return
-          await renderJob(job)
-          await processFast()
+      try {
+        // Process fast jobs first (I/O bound — higher concurrency)
+        if (fastQueue.length > 0) {
+          const fastJobQueue = [...fastQueue]
+          async function processFast(): Promise<void> {
+            throwIfCanceled(cancellation)
+            const job = fastJobQueue.shift()
+            if (!job) return
+            await renderJob(job)
+            if (!cancellation.isCanceled) await processFast()
+          }
+          const fastWorkers = Array.from(
+            { length: Math.min(FAST_CONCURRENCY, fastQueue.length) },
+            () => processFast()
+          )
+          await Promise.all(fastWorkers)
         }
-        const fastWorkers = Array.from(
-          { length: Math.min(FAST_CONCURRENCY, fastQueue.length) },
-          () => processFast()
-        )
-        await Promise.all(fastWorkers)
-      }
 
-      // Then process slow jobs (encoding — adaptive concurrency)
-      if (slowQueue.length > 0) {
-        const slowJobQueue = [...slowQueue]
-        async function processSlow(): Promise<void> {
-          const job = slowJobQueue.shift()
-          if (!job) return
-          await renderJob(job)
-          await processSlow()
+        // Then process slow jobs (encoding — adaptive concurrency)
+        if (slowQueue.length > 0) {
+          const slowJobQueue = [...slowQueue]
+          async function processSlow(): Promise<void> {
+            throwIfCanceled(cancellation)
+            const job = slowJobQueue.shift()
+            if (!job) return
+            await renderJob(job)
+            if (!cancellation.isCanceled) await processSlow()
+          }
+          const slowWorkers = Array.from(
+            { length: Math.min(getSlowConcurrency(), slowQueue.length) },
+            () => processSlow()
+          )
+          await Promise.all(slowWorkers)
         }
-        const slowWorkers = Array.from(
-          { length: Math.min(getSlowConcurrency(), slowQueue.length) },
-          () => processSlow()
-        )
-        await Promise.all(slowWorkers)
+      } catch (err: unknown) {
+        const error = toRenderError(err)
+        if (error instanceof RenderCanceledError || cancellation.isCanceled) {
+          for (const r of results) {
+            if (r.status !== 'done' && r.status !== 'error') {
+              r.status = 'canceled'
+              r.error = 'Render canceled'
+            }
+          }
+          for (const job of jobs) {
+            if (results.find((r) => r.jobId === job.id)?.status === 'canceled') {
+              try { unlinkSync(job.outputPath) } catch {}
+            }
+          }
+          sendProgress({ force: true })
+        } else {
+          throw error
+        }
+      } finally {
+        for (const job of jobs) {
+          if (job.captionsAssPath) {
+            releaseTempFile(job.captionsAssPath)
+          }
+        }
+        activeRenderBatches.delete(batchId)
+        if (cancellation.isCanceled) {
+          clearTrackedTempFiles()
+        }
       }
 
       return results
@@ -879,21 +1159,24 @@ Style: Highlight,Arial,${fontSize},&H0000FFFF,&H000000FF,&H00000000,&H80000000,-
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
 
-  const dialogueLines = captions.map((cap) => {
+  const dialogueLines = captions.flatMap((cap) => {
+    if (!Number.isFinite(cap.start) || !Number.isFinite(cap.end) || cap.end <= cap.start) return []
+    const text = sanitizeAssText(cap.text).trim()
+    if (!text) return []
     const start = formatAssTimestamp(cap.start)
     const end = formatAssTimestamp(cap.end)
-    const text = cap.text.replace(/\n/g, '\\N')
-    return `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`
+    return [`Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`]
   })
 
   return header + '\n' + dialogueLines.join('\n') + '\n'
 }
 
 export function formatAssTimestamp(ms: number): string {
-  const h = Math.floor(ms / 3600000)
-  const m = Math.floor((ms % 3600000) / 60000)
-  const s = Math.floor((ms % 60000) / 1000)
-  const cs = Math.floor((ms % 1000) / 10)
+  const safeMs = clampFiniteNumber(ms, 0, 0, Number.MAX_SAFE_INTEGER)
+  const h = Math.floor(safeMs / 3600000)
+  const m = Math.floor((safeMs % 3600000) / 60000)
+  const s = Math.floor((safeMs % 60000) / 1000)
+  const cs = Math.floor((safeMs % 1000) / 10)
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`
 }
 
@@ -903,17 +1186,18 @@ export function generateWordHighlightAssFile(
   style?: FullCaptionStyle,
   position?: { x: number; y: number }
 ): string {
-  const s = style || DEFAULT_STYLE
+  const s = sanitizeCaptionStyle(style)
+  const cleanWordChunks = sanitizeWordChunks(wordChunks)
   switch (s.animation) {
     case 'word-pop':
-      return generateWordPopAss(wordChunks, resolution, s, position)
+      return generateWordPopAss(cleanWordChunks, resolution, s, position)
     case 'fade-in':
-      return generateFadeInAss(wordChunks, resolution, s, position)
+      return generateFadeInAss(cleanWordChunks, resolution, s, position)
     case 'glow':
-      return generateGlowAss(wordChunks, resolution, s, position)
+      return generateGlowAss(cleanWordChunks, resolution, s, position)
     case 'karaoke-fill':
     default:
-      return generateKaraokeFillAss(wordChunks, resolution, s, position)
+      return generateKaraokeFillAss(cleanWordChunks, resolution, s, position)
   }
 }
 
@@ -927,7 +1211,108 @@ function computeMarginV(
 }
 
 type WordChunk = { text: string; start: number; end: number }
+type CaptionSegment = { wordChunks: WordChunk[]; offsetMs: number; durationMs?: number }
 type LineFormatter = (lineWords: WordChunk[], styleName: string) => string
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function clampFiniteNumber(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  return Math.min(max, Math.max(min, value))
+}
+
+function sanitizeWordsPerLine(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_STYLE.wordsPerLine
+  }
+  if (value < 1) {
+    return MAX_WORDS_PER_LINE
+  }
+  return Math.round(Math.min(MAX_WORDS_PER_LINE, value))
+}
+
+function sanitizeCssHexColor(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') return fallback
+  const trimmed = value.trim()
+  return CSS_HEX_COLOR_PATTERN.test(trimmed) ? trimmed.toUpperCase() : fallback
+}
+
+function sanitizeAssStyleText(value: unknown, fallback: string, pattern: RegExp): string {
+  if (typeof value !== 'string') return fallback
+  const trimmed = value.trim().slice(0, 80)
+  if (!trimmed || !pattern.test(trimmed)) return fallback
+  return trimmed.replace(/,/g, '')
+}
+
+function sanitizeCaptionAnimation(value: unknown): CaptionAnimation {
+  return typeof value === 'string' && CAPTION_ANIMATIONS.has(value as CaptionAnimation)
+    ? value as CaptionAnimation
+    : DEFAULT_STYLE.animation
+}
+
+function sanitizeCaptionStyle(style?: FullCaptionStyle): FullCaptionStyle {
+  if (!isRecord(style)) return DEFAULT_STYLE
+
+  return {
+    fontName: sanitizeAssStyleText(style.fontName, DEFAULT_STYLE.fontName, SAFE_FONT_NAME_PATTERN),
+    fontFile: sanitizeAssStyleText(style.fontFile, DEFAULT_STYLE.fontFile, SAFE_FONT_FILE_PATTERN),
+    fontSize: clampFiniteNumber(style.fontSize, DEFAULT_STYLE.fontSize, 0.01, 0.2),
+    primaryColor: sanitizeCssHexColor(style.primaryColor, DEFAULT_STYLE.primaryColor),
+    highlightColor: sanitizeCssHexColor(style.highlightColor, DEFAULT_STYLE.highlightColor),
+    outlineColor: sanitizeCssHexColor(style.outlineColor, DEFAULT_STYLE.outlineColor),
+    backColor: sanitizeCssHexColor(style.backColor, DEFAULT_STYLE.backColor),
+    outline: clampFiniteNumber(style.outline, DEFAULT_STYLE.outline, 0, 20),
+    shadow: clampFiniteNumber(style.shadow, DEFAULT_STYLE.shadow, 0, 20),
+    borderStyle: Math.round(clampFiniteNumber(style.borderStyle, DEFAULT_STYLE.borderStyle, 1, 4)),
+    wordsPerLine: sanitizeWordsPerLine(style.wordsPerLine),
+    animation: sanitizeCaptionAnimation(style.animation)
+  }
+}
+
+function sanitizeAssText(text: unknown): string {
+  if (typeof text !== 'string') return ''
+  return text
+    .replace(/[{}]/g, '')
+    .replace(/\r\n|\r|\n/g, '\\N')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .slice(0, MAX_ASS_TEXT_LENGTH)
+}
+
+function sanitizeWordChunks(chunks: ReadonlyArray<WordChunk>): WordChunk[] {
+  const sanitized: WordChunk[] = []
+  for (const chunk of chunks) {
+    if (!isRecord(chunk)) continue
+    const text = sanitizeAssText(chunk.text).trim()
+    if (!text) continue
+    if (typeof chunk.start !== 'number' || typeof chunk.end !== 'number') continue
+    if (!Number.isFinite(chunk.start) || !Number.isFinite(chunk.end)) continue
+    if (chunk.start < 0 || chunk.end <= chunk.start) continue
+    sanitized.push({ text, start: chunk.start, end: chunk.end })
+  }
+  return sanitized.sort((a, b) => a.start - b.start || a.end - b.end)
+}
+
+function sanitizeCaptionSegments(segments: ReadonlyArray<CaptionSegment>): CaptionSegment[] {
+  const sanitized: CaptionSegment[] = []
+  for (const segment of segments) {
+    if (!isRecord(segment)) continue
+    if (!Array.isArray(segment.wordChunks)) continue
+    if (typeof segment.offsetMs !== 'number' || !Number.isFinite(segment.offsetMs)) continue
+    const offsetMs = Math.max(0, segment.offsetMs)
+    const durationMs = clampFiniteNumber(segment.durationMs, Number.NaN, 0, MAX_SEGMENT_DURATION_MS)
+    const cleanSegment: CaptionSegment = {
+      wordChunks: sanitizeWordChunks(segment.wordChunks),
+      offsetMs
+    }
+    if (Number.isFinite(durationMs) && durationMs > 0) {
+      cleanSegment.durationMs = durationMs
+    }
+    sanitized.push(cleanSegment)
+  }
+  return sanitized
+}
 
 function buildAnimationStyleLine(
   style: FullCaptionStyle,
@@ -1085,7 +1470,8 @@ export function generateCombinedAssFile(
   style?: FullCaptionStyle,
   position?: { x: number; y: number }
 ): string {
-  const s = style || DEFAULT_STYLE
+  const s = sanitizeCaptionStyle(style)
+  const cleanSegments = sanitizeCaptionSegments(segments)
   const { width, height } = resolution
   const fontSize = Math.round(height * s.fontSize)
   const marginV = computeMarginV(height, width, position)
@@ -1096,7 +1482,7 @@ export function generateCombinedAssFile(
 
   const allDialogueLines: string[] = []
 
-  for (const segment of segments) {
+  for (const segment of cleanSegments) {
     const offsetSec = segment.offsetMs / 1000
     const durationSec = segment.durationMs != null ? segment.durationMs / 1000 : undefined
 
@@ -1107,9 +1493,10 @@ export function generateCombinedAssFile(
 
       if (durationSec != null) {
         const segEnd = offsetSec + durationSec
-        // Skip words that start at or after segment end
         if (start >= segEnd) continue
-        adjusted.push({ text: chunk.text, start, end: Math.min(end, segEnd) })
+        const clippedEnd = Math.min(end, segEnd)
+        if (clippedEnd <= start) continue
+        adjusted.push({ text: chunk.text, start, end: clippedEnd })
       } else {
         adjusted.push({ text: chunk.text, start, end })
       }

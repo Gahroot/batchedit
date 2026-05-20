@@ -33,6 +33,7 @@ const api = {
   getThumbnail: (videoPath: string) => ipcRenderer.invoke('ffmpeg:thumbnail', videoPath),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   readAudioBuffer: (wavPath: string) => ipcRenderer.invoke('ffmpeg:readAudioBuffer', wavPath),
+  releaseTempFile: (filePath: string) => ipcRenderer.invoke('ffmpeg:releaseTempFile', filePath),
 
   splitVideo: (
     videoPath: string,
@@ -69,6 +70,7 @@ const api = {
 
   // Rendering
   renderBatch: (jobs: any[]) => ipcRenderer.invoke('render:batch', jobs),
+  cancelRender: (batchId?: string) => ipcRenderer.invoke('render:cancel', batchId),
   onRenderProgress: (callback: (progress: any[]) => void) => {
     const handler = (_event: any, progress: any[]) => callback(progress)
     ipcRenderer.on('render:progress', handler)

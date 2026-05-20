@@ -63,10 +63,20 @@ interface RenderJob {
   }
 }
 
+type RenderProgressStatus =
+  | 'queued'
+  | 'normalizing'
+  | 'concatenating'
+  | 'overlaying'
+  | 'rendering'
+  | 'done'
+  | 'error'
+  | 'canceled'
+
 interface RenderProgress {
   jobId: string
   percent: number
-  status: 'queued' | 'normalizing' | 'rendering' | 'done' | 'error'
+  status: RenderProgressStatus
   error?: string
 }
 
@@ -98,6 +108,7 @@ interface Api {
   getThumbnail: (videoPath: string) => Promise<string>
   getPathForFile: (file: File) => string
   readAudioBuffer: (wavPath: string) => Promise<ArrayBuffer>
+  releaseTempFile: (filePath: string) => Promise<void>
   generateCombinedAss: (data: {
     segments: Array<{
       wordChunks: Array<{ text: string; start: number; end: number }>
@@ -127,6 +138,7 @@ interface Api {
   toAssMargins: (rect: SafeZoneRect) => Promise<{ MarginL: number; MarginR: number; MarginV: number }>
   getAllPlatforms: () => Promise<Record<Platform, PlatformSafeZone>>
   renderBatch: (jobs: RenderJob[]) => Promise<RenderProgress[]>
+  cancelRender: (batchId?: string) => Promise<boolean>
   onRenderProgress: (callback: (progress: RenderProgress[]) => void) => () => void
 }
 
