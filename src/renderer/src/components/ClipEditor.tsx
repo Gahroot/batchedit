@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Loader2, Play, Scissors } from 'lucide-react'
 import { useWhisper } from '@/hooks/useWhisper'
-import { normalize, matchBucketSingle, parseNumber } from '@/lib/marker-detection'
+import { normalize, matchBucketSingle, parseNumber } from '../../../shared/marker-detection'
 import { useStore, BucketType, WordChunk } from '../store'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -66,14 +66,16 @@ export function ClipEditor({ open, onOpenChange, clipId, bucket }: ClipEditorPro
     if (!clip) return
     setIsTranscribing(true)
     setError(null)
+    let wavPath: string | null = null
     try {
       if (!isModelReady) {
         await loadModel()
       }
-      const wavPath = await window.api.extractAudio(clip.path)
+      wavPath = await window.api.extractAudio(clip.path)
       const audioBuffer = await window.api.readAudioBuffer(wavPath)
+      wavPath = null
       const audioData = new Float32Array(audioBuffer)
-      const chunks = await transcribe(audioData)
+      const { chunks } = await transcribe(audioData)
       const wordChunks: WordChunk[] = chunks.map((c) => ({
         text: c.text,
         start: c.start,
@@ -81,6 +83,7 @@ export function ClipEditor({ open, onOpenChange, clipId, bucket }: ClipEditorPro
       }))
       setClipTranscript(clipId, wordChunks)
     } catch (err) {
+      if (wavPath) await window.api.releaseTempFile(wavPath)
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setIsTranscribing(false)

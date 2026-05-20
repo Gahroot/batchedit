@@ -1,15 +1,7 @@
-import type { BucketType } from '../store'
+import type { BucketType, DetectedMarker, SpeechInterval, WordChunk } from './types'
 
-export interface WhisperChunk {
-  text: string
-  start: number // seconds
-  end: number   // seconds
-}
-
-export interface SpeechInterval {
-  start: number
-  end: number
-}
+export type { BucketType, DetectedMarker, SpeechInterval }
+export type WhisperChunk = WordChunk
 
 /** Minimum silence before a marker phrase for it to count as a real cue (not speech-internal). */
 const MARKER_LEAD_SILENCE_SEC = 0.3
@@ -41,15 +33,6 @@ function hasSilenceBefore(t: number, intervals: SpeechInterval[]): boolean {
     }
   }
   return true // t is past all speech → definitely silent lead-in
-}
-
-export interface DetectedMarker {
-  id: string
-  label: string
-  bucket: BucketType
-  startTime: number // seconds
-  endTime: number   // seconds
-  markerChunkIndices: number[]
 }
 
 /** Strip punctuation, lowercase, trim — so "Hook," → "hook", "CTA!" → "cta" */

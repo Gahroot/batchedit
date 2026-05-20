@@ -9,7 +9,8 @@ export default defineConfig({
   main: {
     plugins: [
       externalizeDepsPlugin({
-        exclude: ['fluent-ffmpeg', 'uuid', '@google/generative-ai']
+        exclude: ['fluent-ffmpeg', 'uuid', '@google/generative-ai'],
+        external: ['@prestyj/agent', '@prestyj/ai']
       })
     ]
   },

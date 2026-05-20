@@ -1,11 +1,8 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
+import type { BucketType, Platform, TemplateLayout, WordChunk } from '../../shared/types'
 
-export interface WordChunk {
-  text: string
-  start: number
-  end: number
-}
+export type { BucketType, Platform, TemplateLayout, WordChunk }
 
 export interface Clip {
   id: string
@@ -15,8 +12,6 @@ export interface Clip {
   thumbnail?: string
   transcript?: WordChunk[]
 }
-
-export type BucketType = 'hook' | 'meat' | 'cta'
 
 export interface ProjectSettings {
   resolution: { width: number; height: number; label: string }
@@ -69,6 +64,19 @@ export interface ErrorLogEntry {
   message: string
 }
 
+export type AgentEvent = Record<string, unknown> & { type?: string; runId?: string }
+
+export interface ReviewPrompt {
+  reviewId: string
+  reason: string
+  attach?: unknown
+}
+
+export interface ReviewResponse {
+  approved: boolean
+  edits?: unknown
+}
+
 export type CaptionAnimation = 'karaoke-fill' | 'word-pop' | 'fade-in' | 'glow'
 
 export interface CaptionStyle {
@@ -86,14 +94,6 @@ export interface CaptionStyle {
   borderStyle: number
   wordsPerLine: number
   animation: CaptionAnimation
-}
-
-export type Platform = 'tiktok' | 'reels' | 'shorts' | 'universal'
-
-export interface TemplateLayout {
-  titleText: { x: number; y: number }
-  subtitles: { x: number; y: number }
-  media: { x: number; y: number }
 }
 
 export const CAPTION_PRESETS: Record<string, CaptionStyle> = {
@@ -200,6 +200,14 @@ interface AppState {
   addError: (entry: Omit<ErrorLogEntry, 'id' | 'timestamp'>) => void
   clearErrors: () => void
 
+  // Agent state
+  agentRunning: boolean
+  agentEvents: AgentEvent[]
+  agentReviewPrompt: ReviewPrompt | null
+  appendAgentEvent: (event: AgentEvent) => void
+  setAgentReviewPrompt: (prompt: ReviewPrompt | null) => void
+  respondToReview: (response: ReviewResponse) => void
+
   // Actions
   addClips: (bucket: BucketType, clips: Clip[]) => void
   removeClip: (bucket: BucketType, clipId: string) => void
@@ -265,6 +273,9 @@ export const useStore = create<AppState>((set, get) => ({
   setAutoTrimSilence: (enabled) => set({ autoTrimSilence: enabled }),
 
   errorLog: [],
+  agentRunning: false,
+  agentEvents: [],
+  agentReviewPrompt: null,
 
   setMediaOverlay: (bucket, path) =>
     set((state) => ({
@@ -291,6 +302,28 @@ export const useStore = create<AppState>((set, get) => ({
     })),
 
   clearErrors: () => set({ errorLog: [] }),
+
+  appendAgentEvent: (event) =>
+    set((state) => {
+      const agentEvents = [...state.agentEvents, event].slice(-500)
+      const eventType = event.type
+      return {
+        agentEvents,
+        agentRunning: eventType === 'agent_started' ? true : eventType === 'agent_done' || eventType === 'agent_canceled' || eventType === 'error' || eventType === 'agent_failed' ? false : state.agentRunning,
+        agentReviewPrompt: eventType === 'review_requested'
+          ? { reviewId: String(event.reviewId), reason: String(event.reason), attach: event.attach }
+          : state.agentReviewPrompt
+      }
+    }),
+
+  setAgentReviewPrompt: (prompt) => set({ agentReviewPrompt: prompt }),
+
+  respondToReview: (response) => {
+    const prompt = get().agentReviewPrompt
+    if (!prompt) return
+    window.api.agent.respondToReview(prompt.reviewId, response)
+    set({ agentReviewPrompt: null })
+  },
 
   addClips: (bucket, clips) =>
     set((state) => ({
@@ -423,7 +456,10 @@ export const useStore = create<AppState>((set, get) => ({
         captionOffsetMs: project.captionOffsetMs || 0,
         renderProgress: [],
         isRendering: false,
-        errorLog: []
+        errorLog: [],
+        agentRunning: false,
+        agentEvents: [],
+        agentReviewPrompt: null
       })
       return true
     } catch {
@@ -440,6 +476,9 @@ export const useStore = create<AppState>((set, get) => ({
       mediaOverlays: { meat: null, cta: null },
       renderProgress: [],
       isRendering: false,
-      errorLog: []
+      errorLog: [],
+      agentRunning: false,
+      agentEvents: [],
+      agentReviewPrompt: null
     })
 }))

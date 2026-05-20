@@ -95,6 +95,27 @@ interface CaptionStyleOptions {
   animation: 'karaoke-fill' | 'word-pop' | 'fade-in' | 'glow'
 }
 
+type AgentUiEvent = Record<string, unknown> & {
+  type?: string
+  runId?: string
+  error?: string
+  diagnostics?: {
+    name?: string
+    message: string
+    stack?: string
+    provider?: string
+    statusCode?: number
+    cause?: string
+  }
+}
+
+interface AgentStartOptions {
+  sourcePath: string
+  provider?: 'google'
+  model?: string
+  apiKey?: string
+}
+
 interface Api {
   openFiles: () => Promise<string[]>
   openImages: () => Promise<string[]>
@@ -140,6 +161,21 @@ interface Api {
   renderBatch: (jobs: RenderJob[]) => Promise<RenderProgress[]>
   cancelRender: (batchId?: string) => Promise<boolean>
   onRenderProgress: (callback: (progress: RenderProgress[]) => void) => () => void
+  agent: {
+    start: (opts: AgentStartOptions) => Promise<{ runId: string }>
+    cancel: (runId: string) => Promise<void>
+    respondToReview: (reviewId: string, response: { approved: boolean; edits?: unknown }) => Promise<void>
+    onEvent: (cb: (evt: AgentUiEvent) => void) => () => void
+  }
+  agentBridge: {
+    onTranscribeRequest: (cb: (req: { id: string; payload: { path: string; model?: string } }) => void) => () => void
+    replyTranscribe: (id: string, result: { words: Array<{ text: string; start: number; end: number }>; full?: string } | { error: string }) => void
+    onStoreSnapshotRequest: (cb: (req: { id: string; payload: unknown }) => void) => () => void
+    replyStoreSnapshot: (id: string, result: unknown) => void
+    onApplyAction: (cb: (action: { runId?: string; type: string; payload: unknown }) => void) => () => void
+    onStartRender: (cb: (request: { jobId: string }) => void) => () => void
+    sendRenderProgress: (progress: RenderProgress[]) => void
+  }
 }
 
 declare global {

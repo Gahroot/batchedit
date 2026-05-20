@@ -1,372 +1,303 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { WhisperClient } from './whisper-client'
 
-// ---------------------------------------------------------------------------
-// Mock Worker class
-// ---------------------------------------------------------------------------
-
-type MessageHandler = (e: MessageEvent) => void
+type MessageHandler = (event: MessageEvent) => void
 
 class MockWorker {
-  private listeners: Map<string, MessageHandler[]> = new Map()
-  public postMessage = vi.fn()
-  public terminate = vi.fn()
+  private readonly listeners: Map<string, MessageHandler[]> = new Map()
+  public readonly postMessage = vi.fn()
+  public readonly terminate = vi.fn()
 
-  addEventListener(event: string, handler: MessageHandler) {
-    const handlers = this.listeners.get(event) || []
+  addEventListener(event: string, handler: MessageHandler): void {
+    const handlers = this.listeners.get(event) ?? []
     handlers.push(handler)
     this.listeners.set(event, handlers)
   }
 
-  removeEventListener(event: string, handler: MessageHandler) {
-    const handlers = this.listeners.get(event) || []
+  removeEventListener(event: string, handler: MessageHandler): void {
+    const handlers = this.listeners.get(event) ?? []
     this.listeners.set(
       event,
-      handlers.filter((h) => h !== handler)
+      handlers.filter((currentHandler) => currentHandler !== handler)
     )
   }
 
-  /** Simulate the worker sending a message back */
-  simulateMessage(data: unknown) {
-    const handlers = this.listeners.get('message') || []
+  simulateMessage(data: unknown): void {
+    const lastMessage = this.postMessage.mock.calls.at(-1)?.[0] as { requestId?: string } | undefined
+    const responseData =
+      data && typeof data === 'object' && !('requestId' in data) && lastMessage?.requestId
+        ? { ...data, requestId: lastMessage.requestId }
+        : data
+    const handlers = this.listeners.get('message') ?? []
     for (const handler of handlers) {
-      handler({ data } as MessageEvent)
+      handler({ data: responseData } as MessageEvent)
     }
   }
 
   getListenerCount(event: string): number {
-    return (this.listeners.get(event) || []).length
+    return (this.listeners.get(event) ?? []).length
   }
 }
 
-// ---------------------------------------------------------------------------
-// Minimal hook runner — avoids React rendering dependencies
-//
-// useWhisper uses React hooks (useState, useRef, useCallback, useEffect).
-// Instead of pulling in renderHook and full React, we replicate the hook's
-// state-machine logic by directly exercising the MockWorker protocol.
-// ---------------------------------------------------------------------------
-
-/**
- * Creates a test harness that mimics the useWhisper hook's behaviour by
- * operating on the same Worker message protocol.
- */
-function createWhisperHarness() {
+function createWhisperClientHarness(): { client: WhisperClient; worker: MockWorker; createWorker: ReturnType<typeof vi.fn> } {
   const worker = new MockWorker()
+  const createWorker = vi.fn(() => worker as unknown as Worker)
+  const client = new WhisperClient(createWorker)
 
-  // State mirrors useState calls in useWhisper
-  let isModelLoading = false
-  let isModelReady = false
-  let isTranscribing = false
-  let loadProgress = 0
-
-  function loadModel(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      if (isModelReady) return resolve()
-
-      isModelLoading = true
-
-      const handler = (e: MessageEvent) => {
-        const msg = e.data
-        if (msg.type === 'progress' && msg.progress?.progress != null) {
-          loadProgress = Math.round(msg.progress.progress)
-        }
-        if (msg.type === 'status') {
-          if (msg.status === 'ready') {
-            isModelLoading = false
-            isModelReady = true
-            loadProgress = 100
-            worker.removeEventListener('message', handler)
-            resolve()
-          } else if (msg.status === 'error') {
-            isModelLoading = false
-            worker.removeEventListener('message', handler)
-            reject(new Error(msg.error))
-          }
-        }
-      }
-      worker.addEventListener('message', handler)
-      worker.postMessage({ type: 'load' })
-    })
-  }
-
-  function transcribe(audioData: Float32Array): Promise<Array<{ text: string; start: number; end: number }>> {
-    return new Promise((resolve, reject) => {
-      isTranscribing = true
-      const handler = (e: MessageEvent) => {
-        const msg = e.data
-        if (msg.type === 'result') {
-          isTranscribing = false
-          worker.removeEventListener('message', handler)
-          resolve(msg.chunks)
-        } else if (msg.type === 'status' && msg.status === 'error') {
-          isTranscribing = false
-          worker.removeEventListener('message', handler)
-          reject(new Error(msg.error))
-        }
-      }
-      worker.addEventListener('message', handler)
-      worker.postMessage({ type: 'transcribe', data: { audio: audioData } })
-    })
-  }
-
-  return {
-    worker,
-    loadModel,
-    transcribe,
-    getState: () => ({ isModelLoading, isModelReady, isTranscribing, loadProgress })
-  }
+  return { client, worker, createWorker }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe('useWhisper — initial state', () => {
-  it('starts with not loading, not ready, not transcribing, progress 0', () => {
-    const { getState } = createWhisperHarness()
-    const state = getState()
-
-    expect(state.isModelLoading).toBe(false)
-    expect(state.isModelReady).toBe(false)
-    expect(state.isTranscribing).toBe(false)
-    expect(state.loadProgress).toBe(0)
+beforeEach(() => {
+  let nextRequestNumber = 0
+  vi.stubGlobal('crypto', {
+    randomUUID: vi.fn(() => {
+      nextRequestNumber += 1
+      return `test-request-id-${nextRequestNumber}`
+    })
   })
 })
 
-describe('useWhisper — loadModel', () => {
-  it('sets isModelLoading=true while loading', () => {
-    const { worker, loadModel, getState } = createWhisperHarness()
+describe('WhisperClient — initial state', () => {
+  it('starts with not loading, not ready, not transcribing, progress 0', () => {
+    const { client } = createWhisperClientHarness()
 
-    // Start loading (don't await yet)
-    const promise = loadModel()
-
-    expect(getState().isModelLoading).toBe(true)
-    expect(getState().isModelReady).toBe(false)
-
-    // Complete loading
-    worker.simulateMessage({ type: 'status', status: 'ready' })
-
-    return promise.then(() => {
-      expect(getState().isModelLoading).toBe(false)
-      expect(getState().isModelReady).toBe(true)
+    expect(client.getSnapshot()).toEqual({
+      isModelLoading: false,
+      isModelReady: false,
+      isTranscribing: false,
+      loadProgress: 0
     })
   })
+})
 
-  it('sends { type: "load" } to the worker', () => {
-    const { worker, loadModel } = createWhisperHarness()
+describe('WhisperClient — shared worker lifecycle', () => {
+  it('creates one worker for multiple load and transcribe requests', async () => {
+    const { client, worker, createWorker } = createWhisperClientHarness()
 
-    loadModel()
-
-    expect(worker.postMessage).toHaveBeenCalledWith({ type: 'load' })
-
-    // Cleanup
+    const loadPromise = client.loadModel()
     worker.simulateMessage({ type: 'status', status: 'ready' })
+    await loadPromise
+
+    const transcribePromise = client.transcribe(new Float32Array([0.1]))
+    worker.simulateMessage({ type: 'result', chunks: [], speechIntervals: [] })
+    await transcribePromise
+
+    expect(createWorker).toHaveBeenCalledTimes(1)
+    expect(worker.getListenerCount('message')).toBe(1)
   })
 
-  it('resolves when worker sends "ready" status', async () => {
-    const { worker, loadModel, getState } = createWhisperHarness()
+  it('reuses an in-flight load promise for the same model', async () => {
+    const { client, worker } = createWhisperClientHarness()
 
-    const promise = loadModel()
-    worker.simulateMessage({ type: 'status', status: 'ready' })
+    const firstLoad = client.loadModel('onnx-community/whisper-large-v3-turbo_timestamped')
+    const secondLoad = client.loadModel('onnx-community/whisper-large-v3-turbo_timestamped')
 
-    await promise
-
-    expect(getState().isModelReady).toBe(true)
-    expect(getState().loadProgress).toBe(100)
-  })
-
-  it('updates loadProgress on worker progress messages', async () => {
-    const { worker, loadModel, getState } = createWhisperHarness()
-
-    const promise = loadModel()
-
-    worker.simulateMessage({ type: 'progress', progress: { progress: 25 } })
-    expect(getState().loadProgress).toBe(25)
-
-    worker.simulateMessage({ type: 'progress', progress: { progress: 50 } })
-    expect(getState().loadProgress).toBe(50)
-
-    worker.simulateMessage({ type: 'progress', progress: { progress: 75.4 } })
-    expect(getState().loadProgress).toBe(75) // Math.round
+    expect(firstLoad).toBe(secondLoad)
+    expect(worker.postMessage).toHaveBeenCalledTimes(1)
 
     worker.simulateMessage({ type: 'status', status: 'ready' })
-    await promise
-
-    expect(getState().loadProgress).toBe(100)
+    await expect(secondLoad).resolves.toBeUndefined()
   })
 
-  it('rejects on worker error message', async () => {
-    const { worker, loadModel, getState } = createWhisperHarness()
+  it('does not post a new load after the same model is ready', async () => {
+    const { client, worker } = createWhisperClientHarness()
 
-    const promise = loadModel()
-    worker.simulateMessage({
-      type: 'status',
-      status: 'error',
-      error: 'Out of memory'
-    })
-
-    await expect(promise).rejects.toThrow('Out of memory')
-    expect(getState().isModelLoading).toBe(false)
-  })
-
-  it('resolves immediately if model is already loaded', async () => {
-    const { worker, loadModel, getState } = createWhisperHarness()
-
-    // First load
-    const p1 = loadModel()
+    const loadPromise = client.loadModel('Xenova/whisper-tiny.en')
     worker.simulateMessage({ type: 'status', status: 'ready' })
-    await p1
+    await loadPromise
 
-    expect(getState().isModelReady).toBe(true)
-
-    // Second call should resolve immediately without posting to worker
     worker.postMessage.mockClear()
-    await loadModel()
+    await client.loadModel('Xenova/whisper-tiny.en')
 
-    // Should not have posted another 'load' message
     expect(worker.postMessage).not.toHaveBeenCalled()
   })
 
-  it('removes the message listener after success', async () => {
-    const { worker, loadModel } = createWhisperHarness()
+  it('notifies all subscribers from the same shared state updates', () => {
+    const { client } = createWhisperClientHarness()
+    const firstListener = vi.fn()
+    const secondListener = vi.fn()
 
-    const promise = loadModel()
-    const listenersBefore = worker.getListenerCount('message')
-    expect(listenersBefore).toBe(1)
+    client.subscribe(firstListener)
+    client.subscribe(secondListener)
+
+    client.loadModel()
+
+    expect(firstListener).toHaveBeenCalled()
+    expect(secondListener).toHaveBeenCalled()
+    expect(client.getSnapshot().isModelLoading).toBe(true)
+  })
+})
+
+describe('WhisperClient — loadModel', () => {
+  it('sets isModelLoading=true while loading', async () => {
+    const { client, worker } = createWhisperClientHarness()
+
+    const promise = client.loadModel()
+
+    expect(client.getSnapshot().isModelLoading).toBe(true)
+    expect(client.getSnapshot().isModelReady).toBe(false)
 
     worker.simulateMessage({ type: 'status', status: 'ready' })
     await promise
 
-    expect(worker.getListenerCount('message')).toBe(0)
+    expect(client.getSnapshot().isModelLoading).toBe(false)
+    expect(client.getSnapshot().isModelReady).toBe(true)
   })
 
-  it('removes the message listener after error', async () => {
-    const { worker, loadModel } = createWhisperHarness()
+  it('sends { type: "load" } to the worker', async () => {
+    const { client, worker } = createWhisperClientHarness()
 
-    const promise = loadModel()
-    expect(worker.getListenerCount('message')).toBe(1)
+    const promise = client.loadModel()
 
-    worker.simulateMessage({ type: 'status', status: 'error', error: 'fail' })
-    await promise.catch(() => {})
+    expect(worker.postMessage).toHaveBeenCalledWith({
+      type: 'load',
+      requestId: 'whisper-test-request-id-1',
+      data: { model: undefined }
+    })
 
-    expect(worker.getListenerCount('message')).toBe(0)
+    worker.simulateMessage({ type: 'status', status: 'ready' })
+    await promise
+  })
+
+  it('updates loadProgress on worker progress messages', async () => {
+    const { client, worker } = createWhisperClientHarness()
+
+    const promise = client.loadModel()
+
+    worker.simulateMessage({ type: 'progress', progress: { progress: 25 } })
+    expect(client.getSnapshot().loadProgress).toBe(25)
+
+    worker.simulateMessage({ type: 'progress', progress: { progress: 50 } })
+    expect(client.getSnapshot().loadProgress).toBe(50)
+
+    worker.simulateMessage({ type: 'progress', progress: { progress: 75.4 } })
+    expect(client.getSnapshot().loadProgress).toBe(75)
+
+    worker.simulateMessage({ type: 'status', status: 'ready' })
+    await promise
+
+    expect(client.getSnapshot().loadProgress).toBe(100)
+  })
+
+  it('rejects on worker error message', async () => {
+    const { client, worker } = createWhisperClientHarness()
+
+    const promise = client.loadModel()
+    worker.simulateMessage({ type: 'status', status: 'error', error: 'Out of memory' })
+
+    await expect(promise).rejects.toThrow('Out of memory')
+    expect(client.getSnapshot().isModelLoading).toBe(false)
+  })
+
+  it('ignores stale load responses from a superseded request', async () => {
+    const { client, worker } = createWhisperClientHarness()
+
+    const staleLoad = client.loadModel('first-model')
+    const currentLoad = client.loadModel('second-model')
+
+    await expect(staleLoad).rejects.toThrow('Model load superseded')
+    worker.simulateMessage({ type: 'status', status: 'ready', requestId: 'whisper-test-request-id-1' })
+    expect(client.getSnapshot().isModelReady).toBe(false)
+
+    worker.simulateMessage({ type: 'status', status: 'ready', requestId: 'whisper-test-request-id-2' })
+    await currentLoad
+    expect(client.getSnapshot().isModelReady).toBe(true)
   })
 })
 
-describe('useWhisper — transcribe', () => {
-  it('sends audio data to the worker', () => {
-    const { worker, transcribe } = createWhisperHarness()
+describe('WhisperClient — transcribe', () => {
+  it('sends audio data to the worker', async () => {
+    const { client, worker } = createWhisperClientHarness()
     const audio = new Float32Array([0.1, 0.2, 0.3])
 
-    transcribe(audio)
+    const promise = client.transcribe(audio)
 
     expect(worker.postMessage).toHaveBeenCalledWith({
       type: 'transcribe',
-      data: { audio }
+      requestId: 'whisper-test-request-id-1',
+      data: { audio, model: undefined }
     })
 
-    // Cleanup
-    worker.simulateMessage({
-      type: 'result',
-      chunks: []
-    })
+    worker.simulateMessage({ type: 'result', chunks: [], speechIntervals: [] })
+    await promise
   })
 
-  it('returns chunks on result message', async () => {
-    const { worker, transcribe } = createWhisperHarness()
-    const audio = new Float32Array([0.1])
-
-    const promise = transcribe(audio)
-
+  it('returns chunks and speech intervals on result message', async () => {
+    const { client, worker } = createWhisperClientHarness()
+    const promise = client.transcribe(new Float32Array([0.1]))
     const expectedChunks = [
-      { text: 'Hello world', start: 0.0, end: 1.5 },
-      { text: 'How are you', start: 1.5, end: 3.0 }
+      { text: 'Hello world', start: 0, end: 1.5 },
+      { text: 'How are you', start: 1.5, end: 3 }
     ]
+    const expectedSpeechIntervals = [{ start: 0, end: 3 }]
 
-    worker.simulateMessage({ type: 'result', chunks: expectedChunks })
+    worker.simulateMessage({ type: 'result', chunks: expectedChunks, speechIntervals: expectedSpeechIntervals })
 
-    const result = await promise
-    expect(result).toEqual(expectedChunks)
+    await expect(promise).resolves.toEqual({ chunks: expectedChunks, speechIntervals: expectedSpeechIntervals })
   })
 
-  it('sets isTranscribing=true while transcribing', () => {
-    const { worker, transcribe, getState } = createWhisperHarness()
+  it('sets isTranscribing=true while transcribing', async () => {
+    const { client, worker } = createWhisperClientHarness()
 
-    expect(getState().isTranscribing).toBe(false)
+    expect(client.getSnapshot().isTranscribing).toBe(false)
 
-    const promise = transcribe(new Float32Array([0.1]))
-    expect(getState().isTranscribing).toBe(true)
-
-    worker.simulateMessage({ type: 'result', chunks: [] })
-
-    return promise.then(() => {
-      expect(getState().isTranscribing).toBe(false)
-    })
-  })
-
-  it('rejects on worker error during transcription', async () => {
-    const { worker, transcribe, getState } = createWhisperHarness()
-
-    const promise = transcribe(new Float32Array([0.1]))
-
-    worker.simulateMessage({
-      type: 'status',
-      status: 'error',
-      error: 'Transcription failed: invalid audio'
-    })
-
-    await expect(promise).rejects.toThrow('Transcription failed: invalid audio')
-    expect(getState().isTranscribing).toBe(false)
-  })
-
-  it('removes the message listener after receiving result', async () => {
-    const { worker, transcribe } = createWhisperHarness()
-
-    const promise = transcribe(new Float32Array([0.1]))
-    expect(worker.getListenerCount('message')).toBe(1)
+    const promise = client.transcribe(new Float32Array([0.1]))
+    expect(client.getSnapshot().isTranscribing).toBe(true)
 
     worker.simulateMessage({ type: 'result', chunks: [] })
     await promise
 
-    expect(worker.getListenerCount('message')).toBe(0)
+    expect(client.getSnapshot().isTranscribing).toBe(false)
   })
 
-  it('removes the message listener after transcription error', async () => {
-    const { worker, transcribe } = createWhisperHarness()
+  it('rejects on worker error during transcription', async () => {
+    const { client, worker } = createWhisperClientHarness()
 
-    const promise = transcribe(new Float32Array([0.1]))
-    expect(worker.getListenerCount('message')).toBe(1)
+    const promise = client.transcribe(new Float32Array([0.1]))
+    worker.simulateMessage({ type: 'status', status: 'error', error: 'Transcription failed: invalid audio' })
 
-    worker.simulateMessage({ type: 'status', status: 'error', error: 'fail' })
-    await promise.catch(() => {})
-
-    expect(worker.getListenerCount('message')).toBe(0)
+    await expect(promise).rejects.toThrow('Transcription failed: invalid audio')
+    expect(client.getSnapshot().isTranscribing).toBe(false)
   })
 
   it('handles empty chunks result', async () => {
-    const { worker, transcribe } = createWhisperHarness()
+    const { client, worker } = createWhisperClientHarness()
 
-    const promise = transcribe(new Float32Array([0.1]))
+    const promise = client.transcribe(new Float32Array([0.1]))
     worker.simulateMessage({ type: 'result', chunks: [] })
 
-    const result = await promise
-    expect(result).toEqual([])
+    await expect(promise).resolves.toEqual({ chunks: [], speechIntervals: [] })
   })
 
   it('ignores unrelated message types during transcription', async () => {
-    const { worker, transcribe } = createWhisperHarness()
+    const { client, worker } = createWhisperClientHarness()
 
-    const promise = transcribe(new Float32Array([0.1]))
-
-    // Send an unrelated progress message — should be ignored
+    const promise = client.transcribe(new Float32Array([0.1]))
     worker.simulateMessage({ type: 'progress', progress: { progress: 50 } })
 
-    // isTranscribing should still be true (not resolved yet)
-    // Now send the actual result
     const chunks = [{ text: 'test', start: 0, end: 1 }]
     worker.simulateMessage({ type: 'result', chunks })
 
-    const result = await promise
-    expect(result).toEqual(chunks)
+    await expect(promise).resolves.toEqual({ chunks, speechIntervals: [] })
+  })
+
+  it('ignores stale transcription responses from a superseded request', async () => {
+    const { client, worker } = createWhisperClientHarness()
+
+    const staleTranscription = client.transcribe(new Float32Array([0.1]))
+    const currentTranscription = client.transcribe(new Float32Array([0.2]))
+
+    await expect(staleTranscription).rejects.toThrow('Transcription superseded')
+    worker.simulateMessage({
+      type: 'result',
+      requestId: 'whisper-test-request-id-1',
+      chunks: [{ text: 'stale', start: 0, end: 1 }]
+    })
+    expect(client.getSnapshot().isTranscribing).toBe(true)
+
+    const currentChunks = [{ text: 'current', start: 0, end: 1 }]
+    worker.simulateMessage({ type: 'result', requestId: 'whisper-test-request-id-2', chunks: currentChunks })
+
+    await expect(currentTranscription).resolves.toEqual({ chunks: currentChunks, speechIntervals: [] })
   })
 })

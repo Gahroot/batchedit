@@ -64,13 +64,15 @@ function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
       for (let i = 0; i < emptyClips.length; i++) {
         const clip = emptyClips[i]
 
+        let wavPath: string | null = null
         try {
           // Transcribe
           setHookTextProgress({ stage: 'transcribing', currentClip: clip.name, completedClips: i, totalClips: total })
-          const wavPath = await window.api.extractAudio(clip.path)
+          wavPath = await window.api.extractAudio(clip.path)
           const audioBuffer = await window.api.readAudioBuffer(wavPath)
+          wavPath = null
           const float32 = new Float32Array(audioBuffer)
-          const chunks = await transcribe(float32)
+          const { chunks } = await transcribe(float32)
           const transcript = chunks.map((c) => c.text).join(' ').trim()
 
           if (!transcript) {
@@ -83,6 +85,7 @@ function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
           const hookText = await window.api.generateHookText(geminiApiKey, transcript)
           setHookText(clip.id, hookText)
         } catch (err) {
+          if (wavPath) await window.api.releaseTempFile(wavPath)
           addError({ source: 'hooktext', clipName: clip.name, message: err instanceof Error ? err.message : String(err) })
         }
       }

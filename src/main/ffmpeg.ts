@@ -1,66 +1,118 @@
 import ffmpeg from 'fluent-ffmpeg'
 import { app } from 'electron'
 import { join } from 'path'
-import { existsSync } from 'fs'
-import { execSync } from 'child_process'
+import { existsSync, unlinkSync } from 'fs'
+import { execFileSync } from 'child_process'
 
-function resolveBinaryPath(name: string): string | null {
-  const ext = process.platform === 'win32' ? '.exe' : ''
-  const binary = `${name}${ext}`
+export interface FFmpegReadiness {
+  ready: boolean
+  ffmpegPath: string | null
+  ffprobePath: string | null
+  encoder: string | null
+  issues: string[]
+}
 
-  // Production: check extraResources/bin
-  if (app.isPackaged) {
-    const resourceBin = join(process.resourcesPath, 'bin', binary)
-    if (existsSync(resourceBin)) return resourceBin
+interface BinaryResolution {
+  path: string | null
+  issues: string[]
+}
 
-    // Also check asar-unpacked node_modules (legacy)
-    const unpackedFfmpeg = join(
-      process.resourcesPath,
-      'app.asar.unpacked',
-      'node_modules',
-      name === 'ffmpeg' ? 'ffmpeg-static' : '@ffprobe-installer',
-      binary
-    )
-    if (existsSync(unpackedFfmpeg)) return unpackedFfmpeg
-  }
+function normalizeAsarUnpackedPath(binaryPath: string): string {
+  return binaryPath.replace('app.asar', 'app.asar.unpacked')
+}
 
-  // Dev: use npm packages
+function isUsableFile(filePath: string | null): filePath is string {
+  return filePath !== null && existsSync(filePath)
+}
+
+function resolvePackageBinaryPath(name: 'ffmpeg' | 'ffprobe'): BinaryResolution {
   try {
     if (name === 'ffmpeg') {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const p = require('ffmpeg-static') as string | null
-      if (p) return p
-    } else {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { path: p } = require('@ffprobe-installer/ffprobe') as { path: string }
-      if (p) return p
+      const packagePath = require('ffmpeg-static') as string | null
+      const unpackedPath = packagePath ? normalizeAsarUnpackedPath(packagePath) : null
+      return isUsableFile(unpackedPath)
+        ? { path: unpackedPath, issues: [] }
+        : { path: null, issues: [`ffmpeg-static did not provide a usable binary path (${unpackedPath ?? 'null'}).`] }
     }
-  } catch {
-    // Package not available for this platform — fall through
+
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { path: packagePath } = require('@ffprobe-installer/ffprobe') as { path: string }
+    const unpackedPath = normalizeAsarUnpackedPath(packagePath)
+    return isUsableFile(unpackedPath)
+      ? { path: unpackedPath, issues: [] }
+      : { path: null, issues: [`@ffprobe-installer/ffprobe did not provide a usable binary path (${unpackedPath}).`] }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return { path: null, issues: [`Unable to load ${name} npm package: ${message}`] }
+  }
+}
+
+function getFfprobePlatformPackage(): string {
+  const arch = process.arch === 'x64' ? 'x64' : process.arch === 'arm64' ? 'arm64' : process.arch
+  return `${process.platform}-${arch}`
+}
+
+function resolveBinaryPath(name: 'ffmpeg' | 'ffprobe'): BinaryResolution {
+  const ext = process.platform === 'win32' ? '.exe' : ''
+  const binary = `${name}${ext}`
+  const issues: string[] = []
+
+  if (app.isPackaged) {
+    const resourceBin = join(process.resourcesPath, 'bin', binary)
+    if (existsSync(resourceBin)) return { path: resourceBin, issues }
+    issues.push(`Missing packaged ${name} binary at ${resourceBin}.`)
   }
 
-  return null
+  const packageResolution = resolvePackageBinaryPath(name)
+  issues.push(...packageResolution.issues)
+  if (packageResolution.path) return { path: packageResolution.path, issues }
+
+  if (app.isPackaged) {
+    const unpackedNodeModules = join(process.resourcesPath, 'app.asar.unpacked', 'node_modules')
+    const candidates = name === 'ffmpeg'
+      ? [join(unpackedNodeModules, 'ffmpeg-static', binary)]
+      : [
+          join(unpackedNodeModules, '@ffprobe-installer', 'ffprobe', binary),
+          join(unpackedNodeModules, '@ffprobe-installer', getFfprobePlatformPackage(), binary)
+        ]
+
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return { path: candidate, issues }
+    }
+    issues.push(`Missing unpacked ${name} binary under ${unpackedNodeModules}.`)
+  }
+
+  return { path: null, issues }
 }
 
 let ffmpegReady = false
+let ffmpegIssues: string[] = []
 let resolvedFfmpegPath: string | null = null
+let resolvedFfprobePath: string | null = null
 
-export function setupFFmpeg(): void {
+export function setupFFmpeg(): FFmpegReadiness {
   const ffmpegBin = resolveBinaryPath('ffmpeg')
   const ffprobeBin = resolveBinaryPath('ffprobe')
 
-  if (ffmpegBin) {
-    ffmpeg.setFfmpegPath(ffmpegBin)
-    resolvedFfmpegPath = ffmpegBin
+  resolvedFfmpegPath = ffmpegBin.path
+  resolvedFfprobePath = ffprobeBin.path
+  ffmpegIssues = [...ffmpegBin.issues, ...ffprobeBin.issues]
+  cachedEncoder = null
+
+  if (resolvedFfmpegPath) {
+    ffmpeg.setFfmpegPath(resolvedFfmpegPath)
   }
-  if (ffprobeBin) {
-    ffmpeg.setFfprobePath(ffprobeBin)
+  if (resolvedFfprobePath) {
+    ffmpeg.setFfprobePath(resolvedFfprobePath)
   }
 
-  ffmpegReady = !!(ffmpegBin && ffprobeBin)
+  ffmpegReady = Boolean(resolvedFfmpegPath && resolvedFfprobePath)
+  if (ffmpegReady) {
+    detectHardwareEncoder()
+  }
 
-  // Probe available hardware encoders at startup
-  detectHardwareEncoder()
+  return getFFmpegReadiness()
 }
 
 // --- Hardware encoder detection ---
@@ -78,9 +130,14 @@ let cachedEncoder: HwEncoder | null = null
 function detectHardwareEncoder(): HwEncoder {
   if (cachedEncoder !== null) return cachedEncoder
 
-  const bin = resolvedFfmpegPath ?? 'ffmpeg'
+  if (!resolvedFfmpegPath) {
+    cachedEncoder = 'libx264'
+    ffmpegIssues.push('FFmpeg encoder probe skipped because no bundled ffmpeg binary was resolved.')
+    return cachedEncoder
+  }
+
   try {
-    const output = execSync(`"${bin}" -encoders -hide_banner`, {
+    const output = execFileSync(resolvedFfmpegPath, ['-encoders', '-hide_banner'], {
       encoding: 'utf-8',
       timeout: 10_000,
       stdio: ['pipe', 'pipe', 'pipe']
@@ -88,16 +145,17 @@ function detectHardwareEncoder(): HwEncoder {
     for (const enc of hwEncoderPriority) {
       if (output.includes(enc)) {
         cachedEncoder = enc
-        console.log(`[FFmpeg] Hardware encoder detected: ${enc}`)
+        console.info(`[FFmpeg] Hardware encoder detected: ${enc}`)
         return enc
       }
     }
-  } catch {
-    // If detection fails, fall back to software
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ffmpegIssues.push(`Unable to probe ffmpeg encoders at ${resolvedFfmpegPath}: ${message}`)
   }
 
   cachedEncoder = 'libx264'
-  console.log('[FFmpeg] No hardware encoder found, using libx264')
+  console.info('[FFmpeg] No hardware encoder found, using libx264')
   return cachedEncoder
 }
 
@@ -131,8 +189,22 @@ export function isGpuSessionError(errorMessage: string): boolean {
   )
 }
 
+export function getFFmpegReadiness(): FFmpegReadiness {
+  return {
+    ready: ffmpegReady,
+    ffmpegPath: resolvedFfmpegPath,
+    ffprobePath: resolvedFfprobePath,
+    encoder: cachedEncoder,
+    issues: [...ffmpegIssues]
+  }
+}
+
 export function isFFmpegAvailable(): boolean {
   return ffmpegReady
+}
+
+export function getResolvedFfmpegPath(): string | null {
+  return resolvedFfmpegPath
 }
 
 export function getVideoMetadata(
@@ -177,7 +249,10 @@ export function extractAudio(videoPath: string, outputPath: string): Promise<str
       .audioChannels(1)
       .format('wav')
       .on('end', () => resolve(outputPath))
-      .on('error', reject)
+      .on('error', (err) => {
+        try { unlinkSync(outputPath) } catch {}
+        reject(err)
+      })
       .save(outputPath)
   })
 }
@@ -195,6 +270,7 @@ export function trimVideo(
       .outputOptions(['-y', '-c', 'copy'])
       .on('end', () => resolve(outputPath))
       .on('error', () => {
+        try { unlinkSync(outputPath) } catch {}
         // Fallback: re-encode if stream copy fails
         const { encoder, presetFlag } = getEncoder()
         ffmpeg(inputPath)
@@ -202,7 +278,10 @@ export function trimVideo(
           .setDuration(endTime - startTime)
           .outputOptions(['-y', '-c:v', encoder, ...presetFlag, '-c:a', 'aac'])
           .on('end', () => resolve(outputPath))
-          .on('error', reject)
+          .on('error', (err) => {
+            try { unlinkSync(outputPath) } catch {}
+            reject(err)
+          })
           .save(outputPath)
       })
       .save(outputPath)
@@ -222,7 +301,10 @@ export function trimVideoReencode(
       .setDuration(endTime - startTime)
       .outputOptions(['-y', '-c:v', encoder, ...presetFlag, '-c:a', 'aac'])
       .on('end', () => resolve(outputPath))
-      .on('error', reject)
+      .on('error', (err) => {
+        try { unlinkSync(outputPath) } catch {}
+        reject(err)
+      })
       .save(outputPath)
   })
 }

@@ -1,10 +1,81 @@
 import { describe, it, expect } from 'vitest'
+import { existsSync, mkdtempSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import {
+  escapeConcatPath,
+  escapeFilterPath,
   formatAssTimestamp,
   generateAssFile,
   generateWordHighlightAssFile,
-  generateCombinedAssFile
+  generateCombinedAssFile,
+  trackTempFile,
+  releaseTempFile,
+  clearTrackedTempFiles,
+  getTrackedTempFileCount
 } from './render-pipeline'
+
+// ---------------------------------------------------------------------------
+// Temp-file tracking
+// ---------------------------------------------------------------------------
+describe('temp-file tracking', () => {
+  it('deletes a tracked temp file when released', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'batchedit-test-'))
+    const filePath = join(dir, 'scratch.ass')
+    writeFileSync(filePath, 'temp', 'utf-8')
+
+    trackTempFile(filePath)
+    expect(getTrackedTempFileCount()).toBeGreaterThan(0)
+
+    releaseTempFile(filePath)
+    expect(existsSync(filePath)).toBe(false)
+    expect(getTrackedTempFileCount()).toBe(0)
+  })
+
+  it('clears all tracked temp files without touching untracked files', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'batchedit-test-'))
+    const trackedPath = join(dir, 'tracked.wav')
+    const untrackedPath = join(dir, 'normalized-cache.mp4')
+    writeFileSync(trackedPath, 'temp', 'utf-8')
+    writeFileSync(untrackedPath, 'cache', 'utf-8')
+
+    trackTempFile(trackedPath)
+    clearTrackedTempFiles()
+
+    expect(existsSync(trackedPath)).toBe(false)
+    expect(existsSync(untrackedPath)).toBe(true)
+    expect(getTrackedTempFileCount()).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FFmpeg path escaping
+// ---------------------------------------------------------------------------
+describe('escapeConcatPath', () => {
+  it('normalizes Windows separators and escapes single quotes for ffconcat files', () => {
+    expect(escapeConcatPath("C:\\Users\\O'Brien\\clip [v1], final; ok.mp4"))
+      .toBe("C:/Users/O'\\''Brien/clip [v1], final; ok.mp4")
+  })
+
+  it('rejects line breaks because ffconcat is line-oriented', () => {
+    expect(() => escapeConcatPath('/tmp/bad\nname.mp4')).toThrow('FFmpeg concat path cannot contain line breaks')
+    expect(() => escapeConcatPath('/tmp/bad\rname.mp4')).toThrow('FFmpeg concat path cannot contain line breaks')
+  })
+})
+
+describe('escapeFilterPath', () => {
+  it('escapes FFmpeg filter metacharacters for ASS filename and fontsdir arguments', () => {
+    const path = "C:\\Batch Edit\\fonts,semi;[bracket]\\O'Brien: captions.ass"
+
+    expect(escapeFilterPath(path))
+      .toBe("C\\\\:/Batch Edit/fonts\\\\,semi\\\\;\\\\[bracket\\\\]/O\\\\'Brien\\\\: captions.ass")
+  })
+
+  it('rejects line breaks because filter graphs are line-oriented command arguments', () => {
+    expect(() => escapeFilterPath('/tmp/bad\nname.ass')).toThrow('FFmpeg filter path cannot contain line breaks')
+    expect(() => escapeFilterPath('/tmp/bad\rname.ass')).toThrow('FFmpeg filter path cannot contain line breaks')
+  })
+})
 
 // ---------------------------------------------------------------------------
 // formatAssTimestamp
@@ -56,6 +127,12 @@ describe('formatAssTimestamp', () => {
   it('handles large hour values', () => {
     // 10 hours = 36000000ms
     expect(formatAssTimestamp(36000000)).toBe('10:00:00.00')
+  })
+
+  it('clamps invalid timestamp input to zero', () => {
+    expect(formatAssTimestamp(Number.POSITIVE_INFINITY)).toBe('0:00:00.00')
+    expect(formatAssTimestamp(Number.NaN)).toBe('0:00:00.00')
+    expect(formatAssTimestamp(-1000)).toBe('0:00:00.00')
   })
 })
 
@@ -136,6 +213,22 @@ describe('generateAssFile', () => {
 
     expect(result).toContain('Style: Default,')
     expect(result).toContain('Style: Highlight,')
+  })
+
+  it('drops invalid caption timings and strips ASS override braces', () => {
+    const captions = [
+      { text: '{\\pos(0,0)}safe', start: 0, end: 1000 },
+      { text: 'bad', start: 1000, end: 1000 },
+      { text: 'nan', start: Number.NaN, end: 2000 }
+    ]
+    const result = generateAssFile(captions, resolution)
+    const dialogueLines = result.split('\n').filter((l) => l.startsWith('Dialogue:'))
+
+    expect(dialogueLines).toHaveLength(1)
+    expect(dialogueLines[0]).toContain('\\pos(0,0)safe')
+    expect(dialogueLines[0]).not.toContain('{\\pos')
+    expect(result).not.toContain('bad')
+    expect(result).not.toContain('nan')
   })
 })
 
@@ -249,6 +342,50 @@ describe('generateWordHighlightAssFile', () => {
 
     // Words joined with space: {\\kf50}one {\\kf50}two
     expect(result).toContain('}one {\\kf')
+  })
+
+  it('sanitizes unsafe renderer-provided style and bounds wordsPerLine', () => {
+    const words = Array.from({ length: 13 }, (_, index) => ({
+      text: `w${index}`,
+      start: index * 0.1,
+      end: index * 0.1 + 0.05
+    }))
+    const result = generateWordHighlightAssFile(words, resolution, {
+      fontName: 'Bad,Font{\\pos(0,0)}',
+      fontFile: '../bad.ttf',
+      fontSize: Number.POSITIVE_INFINITY,
+      primaryColor: 'red',
+      highlightColor: '#00ff00',
+      outlineColor: '#GGGGGG',
+      backColor: '#AA112233',
+      outline: Number.NaN,
+      shadow: -10,
+      borderStyle: 99,
+      wordsPerLine: 0,
+      animation: 'karaoke-fill'
+    })
+    const dialogueLines = result.split('\n').filter((l) => l.startsWith('Dialogue:'))
+
+    expect(result).toContain(`Style: Karaoke,Inter,${Math.round(1920 * 0.05)},&H0000FF00,&H00FFFFFF,&H00000000,&HAA332211`)
+    expect(result).not.toContain('Bad,Font')
+    expect(dialogueLines).toHaveLength(2)
+  })
+
+  it('filters invalid word chunks and escapes ASS override braces', () => {
+    const words = [
+      { text: '{\\move(0,0,1,1)}safe', start: 0, end: 0.5 },
+      { text: 'nan', start: Number.NaN, end: 1 },
+      { text: 'backwards', start: 1, end: 0.5 },
+      { text: '', start: 1, end: 2 }
+    ]
+    const result = generateWordHighlightAssFile(words, resolution)
+    const dialogueLines = result.split('\n').filter((l) => l.startsWith('Dialogue:'))
+
+    expect(dialogueLines).toHaveLength(1)
+    expect(dialogueLines[0]).toContain('\\move(0,0,1,1)safe')
+    expect(dialogueLines[0]).not.toContain('{\\move')
+    expect(result).not.toContain('nan')
+    expect(result).not.toContain('backwards')
   })
 })
 
@@ -500,5 +637,65 @@ describe('generateCombinedAssFile', () => {
     expect(dialogueLines).toHaveLength(2)
     expect(dialogueLines[0]).toContain('hello')
     expect(dialogueLines[1]).toContain('world')
+  })
+
+  it('ignores invalid segments and clips zero-length boundary words', () => {
+    const segments = [
+      {
+        wordChunks: [
+          { text: 'keep', start: 0, end: 0.5 },
+          { text: 'drop', start: 0.5, end: 1 }
+        ],
+        offsetMs: Number.NaN,
+        durationMs: 1000
+      },
+      {
+        wordChunks: [
+          { text: 'inside', start: 0, end: 0.5 },
+          { text: 'boundary', start: 1, end: 1.5 },
+          { text: 'zero', start: 0.5, end: 2 }
+        ],
+        offsetMs: 0,
+        durationMs: 500
+      }
+    ]
+    const result = generateCombinedAssFile(segments, resolution)
+    const dialogueLines = result.split('\n').filter((l) => l.startsWith('Dialogue:'))
+
+    expect(dialogueLines).toHaveLength(1)
+    expect(dialogueLines[0]).toContain('inside')
+    expect(dialogueLines[0]).not.toContain('boundary')
+    expect(dialogueLines[0]).not.toContain('zero')
+    expect(result).not.toContain('keep')
+  })
+
+  it('bounds combined wordsPerLine to prevent unbounded or zero-step grouping', () => {
+    const segments = [
+      {
+        wordChunks: Array.from({ length: 13 }, (_, index) => ({
+          text: `word${index}`,
+          start: index * 0.1,
+          end: index * 0.1 + 0.05
+        })),
+        offsetMs: 0
+      }
+    ]
+    const result = generateCombinedAssFile(segments, resolution, {
+      fontName: 'Inter',
+      fontFile: 'Inter-Bold.ttf',
+      fontSize: 0.05,
+      primaryColor: '#FFFFFF',
+      highlightColor: '#FFFF00',
+      outlineColor: '#000000',
+      backColor: '#80000000',
+      outline: 3,
+      shadow: 1,
+      borderStyle: 1,
+      wordsPerLine: Number.POSITIVE_INFINITY,
+      animation: 'karaoke-fill'
+    })
+    const dialogueLines = result.split('\n').filter((l) => l.startsWith('Dialogue:'))
+
+    expect(dialogueLines).toHaveLength(4)
   })
 })

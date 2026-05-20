@@ -4,6 +4,7 @@
 // WebGPU detection + dtype config pattern adapted from dmtrKovalenko/subtitler.
 
 import { pipeline, AutoModel, Tensor } from '@huggingface/transformers'
+import type { AutomaticSpeechRecognitionConfig } from '@huggingface/transformers'
 
 // Silero VAD constants (from transformers.js-examples/moonshine-web/constants.js)
 const SAMPLE_RATE = 16000
@@ -11,10 +12,139 @@ const SPEECH_THRESHOLD = 0.3
 const EXIT_THRESHOLD = 0.1
 const MIN_SILENCE_DURATION_MS = 400
 const VAD_WINDOW_SIZE = 512  // required Silero VAD window at 16kHz
+const DEFAULT_ASR_CHUNK_LENGTH_S = 30
+const DEFAULT_ASR_STRIDE_LENGTH_S = 5
+const DEFAULT_WHISPER_MODEL = 'onnx-community/whisper-large-v3-turbo_timestamped'
+
+type WhisperAsrOptions = Pick<
+  AutomaticSpeechRecognitionConfig,
+  'return_timestamps' | 'chunk_length_s' | 'stride_length_s' | 'task' | 'language' | 'do_sample' | 'num_beams'
+>
+
+function isEnglishOnlyWhisperModel(modelName: string): boolean {
+  return /(?:^|[\/-])whisper[^/]*\.en(?:$|[-_/])/.test(modelName)
+}
+
+export function getWhisperAsrOptions(modelName: string): WhisperAsrOptions {
+  const options: WhisperAsrOptions = {
+    return_timestamps: 'word',
+    chunk_length_s: DEFAULT_ASR_CHUNK_LENGTH_S,
+    stride_length_s: DEFAULT_ASR_STRIDE_LENGTH_S,
+    task: 'transcribe',
+    do_sample: false,
+    num_beams: 1
+  }
+
+  if (isEnglishOnlyWhisperModel(modelName)) {
+    options.language = 'english'
+  }
+
+  return options
+}
 
 export interface SpeechInterval {
   start: number
   end: number
+}
+
+export interface TranscriptionChunk {
+  text: string
+  start: number
+  end: number
+}
+
+const DUPLICATE_OVERLAP_SEC = 0.04
+const DUPLICATE_GAP_SEC = 0.12
+
+function normalizeChunkText(text: string): string {
+  return text.trim().toLocaleLowerCase().replace(/^[\s\p{P}\p{S}]+|[\s\p{P}\p{S}]+$/gu, '')
+}
+
+function chunksOverlapOrTouch(first: TranscriptionChunk, second: TranscriptionChunk): boolean {
+  return second.start <= first.end + DUPLICATE_GAP_SEC && first.start <= second.end + DUPLICATE_OVERLAP_SEC
+}
+
+function chooseDuplicateChunk(first: TranscriptionChunk, second: TranscriptionChunk): TranscriptionChunk {
+  const firstDuration = first.end - first.start
+  const secondDuration = second.end - second.start
+  if (secondDuration <= firstDuration) {
+    return second
+  }
+  return first
+}
+
+export function normalizeTranscriptionChunks(raw: unknown, offset = 0): TranscriptionChunk[] {
+  if (typeof raw !== 'object' || raw == null || !('chunks' in raw) || !Array.isArray(raw.chunks)) {
+    return []
+  }
+
+  const chunks: TranscriptionChunk[] = []
+  for (const chunk of raw.chunks) {
+    if (typeof chunk !== 'object' || chunk == null || !('text' in chunk) || !('timestamp' in chunk)) {
+      continue
+    }
+    if (typeof chunk.text !== 'string' || !Array.isArray(chunk.timestamp)) {
+      continue
+    }
+
+    const text = chunk.text.trim()
+    const rawStart = chunk.timestamp[0]
+    const rawEnd = chunk.timestamp[1]
+    if (text.length === 0 || typeof rawStart !== 'number' || typeof rawEnd !== 'number') {
+      continue
+    }
+
+    const start = rawStart + offset
+    const end = rawEnd + offset
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      continue
+    }
+
+    const clampedStart = Math.max(0, start)
+    chunks.push({
+      text,
+      start: clampedStart,
+      end: Math.max(clampedStart, end)
+    })
+  }
+
+  chunks.sort((a, b) => a.start - b.start || a.end - b.end || a.text.localeCompare(b.text))
+
+  const deduped: TranscriptionChunk[] = []
+  for (const chunk of chunks) {
+    const previous = deduped[deduped.length - 1]
+    if (previous && normalizeChunkText(previous.text) === normalizeChunkText(chunk.text) && chunksOverlapOrTouch(previous, chunk)) {
+      deduped[deduped.length - 1] = chooseDuplicateChunk(previous, chunk)
+    } else {
+      deduped.push(chunk)
+    }
+  }
+
+  return deduped
+}
+
+type WorkerRequest = {
+  type: 'load' | 'transcribe'
+  requestId?: string
+  data?: {
+    model?: string
+    audio?: Float32Array
+  }
+}
+
+let activeLoadRequestId: string | null = null
+let activeTranscribeRequestId: string | null = null
+
+function isStaleLoad(requestId?: string): boolean {
+  return requestId != null && activeLoadRequestId !== requestId
+}
+
+function isStaleTranscription(requestId?: string): boolean {
+  return requestId != null && activeTranscribeRequestId !== requestId
+}
+
+function postWorkerMessage(message: Record<string, unknown>, requestId?: string): void {
+  self.postMessage(requestId ? { ...message, requestId } : message)
 }
 
 async function isWebGPUAvailable(): Promise<boolean> {
@@ -44,7 +174,7 @@ class PipelineFactory {
   static device: 'webgpu' | 'wasm' = 'wasm'
 
   static async getInstance(model?: string, progressCallback?: (progress: any) => void) {
-    const targetModel = model || 'onnx-community/whisper-large-v3-turbo_timestamped'
+    const targetModel = model || DEFAULT_WHISPER_MODEL
 
     if (this.instance && this.currentModel !== targetModel) {
       try { await this.instance.dispose?.() } catch {}
@@ -136,49 +266,50 @@ async function runVad(audio: Float32Array): Promise<SpeechInterval[]> {
   return merged
 }
 
-self.onmessage = async (e: MessageEvent) => {
-  const { type, data } = e.data
+self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
+  const { type, data, requestId } = e.data
 
   switch (type) {
     case 'load': {
-      self.postMessage({ type: 'status', status: 'loading' })
+      activeLoadRequestId = requestId ?? null
+      postWorkerMessage({ type: 'status', status: 'loading' }, requestId)
       try {
         await PipelineFactory.getInstance(data?.model, (progress) => {
-          self.postMessage({ type: 'progress', progress })
+          if (!isStaleLoad(requestId)) {
+            postWorkerMessage({ type: 'progress', progress }, requestId)
+          }
         })
+        if (isStaleLoad(requestId)) {
+          postWorkerMessage({ type: 'status', status: 'cancelled', error: 'Model load superseded' }, requestId)
+          break
+        }
         // Warm VAD in parallel — tiny model, no user-visible progress needed
         VadFactory.getInstance().catch(() => {})
-        self.postMessage({ type: 'status', status: 'ready', device: PipelineFactory.device })
+        postWorkerMessage({ type: 'status', status: 'ready', device: PipelineFactory.device }, requestId)
       } catch (error) {
-        self.postMessage({ type: 'status', status: 'error', error: String(error) })
+        if (!isStaleLoad(requestId)) {
+          postWorkerMessage({ type: 'status', status: 'error', error: String(error) }, requestId)
+        }
       }
       break
     }
     case 'transcribe': {
-      self.postMessage({ type: 'status', status: 'transcribing' })
+      activeTranscribeRequestId = requestId ?? null
+      postWorkerMessage({ type: 'status', status: 'transcribing' }, requestId)
       try {
         const transcriber = await PipelineFactory.getInstance(data?.model)
-        const audio = data.audio as Float32Array
-        const MAX_WORD_SEC = 2.0
+        if (isStaleTranscription(requestId)) {
+          postWorkerMessage({ type: 'status', status: 'cancelled', error: 'Transcription superseded' }, requestId)
+          break
+        }
+        const audio = data?.audio as Float32Array
         const MIN_GAP_SEC = 3.0
         const RESEG_SEC = 12   // max segment size for gap re-transcription
         const PAD_SEC = 0.5    // silence padding prepended for better alignment
         const PAD_SAMPLES = Math.floor(PAD_SEC * SAMPLE_RATE)
 
-        /** Parse raw Whisper chunks: null-safe, offset timestamps, remove hallucinated durations */
-        const parseChunks = (raw: any, offset = 0) =>
-          (raw.chunks || [])
-            .filter((c: any) =>
-              c.text?.trim().length > 0 &&
-              c.timestamp?.[0] != null &&
-              c.timestamp?.[1] != null &&
-              (c.timestamp[1] - c.timestamp[0]) <= MAX_WORD_SEC
-            )
-            .map((c: any) => ({
-              text: c.text.trim(),
-              start: (c.timestamp[0] as number) + offset,
-              end: (c.timestamp[1] as number) + offset
-            }))
+        /** Parse raw Whisper chunks: null-safe, offset timestamps, timestamp validation, and duplicate cleanup */
+        const parseChunks = (raw: unknown, offset = 0): TranscriptionChunk[] => normalizeTranscriptionChunks(raw, offset)
 
         /** Find gaps > MIN_GAP_SEC in sorted word chunks */
         const findGaps = (chunks: Array<{ start: number; end: number }>, totalDuration: number) => {
@@ -203,11 +334,12 @@ self.onmessage = async (e: MessageEvent) => {
          * instead of the entire gap.
          */
         const retranscribeGap = async (gapStart: number, gapEnd: number) => {
-          const recovered: Array<{ text: string; start: number; end: number }> = []
+          const recovered: TranscriptionChunk[] = []
           const gapDuration = gapEnd - gapStart
           const numSegs = Math.ceil(gapDuration / RESEG_SEC)
 
           for (let s = 0; s < numSegs; s++) {
+            if (isStaleTranscription(requestId)) break
             const segStart = gapStart + s * RESEG_SEC
             const segEnd = Math.min(gapStart + (s + 1) * RESEG_SEC, gapEnd)
             const startSample = Math.floor(segStart * SAMPLE_RATE)
@@ -218,7 +350,8 @@ self.onmessage = async (e: MessageEvent) => {
             const padded = new Float32Array(PAD_SAMPLES + rawSlice.length)
             padded.set(rawSlice, PAD_SAMPLES)
 
-            const segResult = await transcriber(padded, { return_timestamps: 'word' })
+            const segResult = await transcriber(padded, getWhisperAsrOptions(PipelineFactory.currentModel ?? DEFAULT_WHISPER_MODEL))
+            if (isStaleTranscription(requestId)) break
             const segChunks = parseChunks(segResult, segStart - PAD_SEC)
               .filter((c: { start: number }) => c.start >= Math.max(0, segStart - 0.2))
             recovered.push(...segChunks)
@@ -227,13 +360,12 @@ self.onmessage = async (e: MessageEvent) => {
         }
 
         // Initial transcription
-        const result = await transcriber(audio, {
-          return_timestamps: 'word',
-          chunk_length_s: 30,
-          stride_length_s: 5
-        })
-        const wordChunks: Array<{ text: string; start: number; end: number }> = parseChunks(result)
-        wordChunks.sort((a, b) => a.start - b.start)
+        const result = await transcriber(audio, getWhisperAsrOptions(PipelineFactory.currentModel ?? DEFAULT_WHISPER_MODEL))
+        if (isStaleTranscription(requestId)) {
+          postWorkerMessage({ type: 'status', status: 'cancelled', error: 'Transcription superseded' }, requestId)
+          break
+        }
+        let wordChunks: TranscriptionChunk[] = parseChunks(result)
 
         // Detect and re-transcribe gaps
         const audioDuration = audio.length / SAMPLE_RATE
@@ -241,25 +373,35 @@ self.onmessage = async (e: MessageEvent) => {
           const gaps = findGaps(wordChunks, audioDuration)
           if (gaps.length === 0) break
           for (const gap of gaps) {
+            if (isStaleTranscription(requestId)) break
             wordChunks.push(...await retranscribeGap(gap.start, gap.end))
           }
-          wordChunks.sort((a, b) => a.start - b.start)
+          if (isStaleTranscription(requestId)) break
+          wordChunks = normalizeTranscriptionChunks({ chunks: wordChunks.map((chunk) => ({ text: chunk.text, timestamp: [chunk.start, chunk.end] })) })
         }
 
         // Run VAD in parallel with transcription post-processing when possible.
         // VAD is carried-state sequential so we await it here.
         let speechIntervals: SpeechInterval[] = []
         try {
-          speechIntervals = await runVad(audio)
+          if (!isStaleTranscription(requestId)) {
+            speechIntervals = await runVad(audio)
+          }
         } catch (vadErr) {
           // Non-fatal: marker detection falls back to pre-VAD behavior
           console.warn('VAD failed, continuing without speech intervals', vadErr)
         }
 
-        self.postMessage({ type: 'result', chunks: wordChunks, speechIntervals })
-        self.postMessage({ type: 'status', status: 'done' })
+        if (isStaleTranscription(requestId)) {
+          postWorkerMessage({ type: 'status', status: 'cancelled', error: 'Transcription superseded' }, requestId)
+          break
+        }
+        postWorkerMessage({ type: 'result', chunks: wordChunks, speechIntervals }, requestId)
+        postWorkerMessage({ type: 'status', status: 'done' }, requestId)
       } catch (error) {
-        self.postMessage({ type: 'status', status: 'error', error: String(error) })
+        if (!isStaleTranscription(requestId)) {
+          postWorkerMessage({ type: 'status', status: 'error', error: String(error) }, requestId)
+        }
       }
       break
     }

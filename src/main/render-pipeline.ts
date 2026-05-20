@@ -1276,6 +1276,7 @@ function sanitizeAssText(text: unknown): string {
   return text
     .replace(/[{}]/g, '')
     .replace(/\r\n|\r|\n/g, '\\N')
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: ASS subtitle sanitization intentionally strips ASCII control characters.
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .slice(0, MAX_ASS_TEXT_LENGTH)
 }

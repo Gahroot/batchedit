@@ -11,8 +11,18 @@ import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { Toaster } from '@/components/ui/sonner'
 import { NumberTicker } from '@/components/ui/number-ticker'
+import { AgentPanel } from './components/AgentPanel'
+import { AgentReviewModal } from './components/AgentReviewModal'
+import { useAgentEvents } from './hooks/useAgentEvents'
+import { useAgentRenderBridge } from './hooks/useAgentRenderBridge'
+import { useAgentStoreBridge } from './hooks/useAgentStoreBridge'
+import { useAgentTranscribeBridge } from './hooks/useAgentTranscribeBridge'
 
 function App() {
+  useAgentEvents()
+  useAgentRenderBridge()
+  useAgentStoreBridge()
+  useAgentTranscribeBridge()
   const totalCombos = useStore((s) => s.getTotalCombinations())
   const saveProject = useStore((s) => s.saveProject)
   const loadProject = useStore((s) => s.loadProject)
@@ -57,15 +67,22 @@ function App() {
       <SettingsBar />
       <Separator />
 
-      {/* Main Content - Three Buckets */}
-      <main className="flex-1 flex gap-4 p-4 overflow-hidden">
-        <Bucket type="hook" label="Hooks" color="text-blue-400" />
-        <Bucket type="meat" label="Meats" color="text-green-400" />
-        <Bucket type="cta" label="CTAs" color="text-orange-400" />
-      </main>
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* Main Content - Three Buckets */}
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <main className="flex-1 flex gap-4 p-4 overflow-hidden">
+            <Bucket type="hook" label="Hooks" color="text-blue-400" />
+            <Bucket type="meat" label="Meats" color="text-green-400" />
+            <Bucket type="cta" label="CTAs" color="text-orange-400" />
+          </main>
 
-      {/* Render Panel */}
-      <RenderPanel />
+          {/* Render Panel */}
+          <RenderPanel />
+        </div>
+        <AgentPanel />
+      </div>
+
+      <AgentReviewModal />
 
       {/* Global toast container */}
       <Toaster richColors position="bottom-right" />

@@ -4,7 +4,8 @@ import { join } from 'path'
 import { readFile, writeFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupFFmpeg } from './ffmpeg'
-import { setupRenderPipeline, clearNormalizedCache } from './render-pipeline'
+import { setupRenderPipeline, clearNormalizedCache, clearTrackedTempFiles } from './render-pipeline'
+import { setupAgent } from './agent/ipc'
 import {
   PLATFORM_SAFE_ZONES,
   getSafeZone,
@@ -18,21 +19,39 @@ import {
   type SafeZoneRect
 } from './safe-zones'
 
-// Show copyable error dialog for uncaught exceptions
-process.on('uncaughtException', (error) => {
-  const detail = `${error.message}\n\n${error.stack || ''}`
+function showMainProcessError(title: string, message: string, error: unknown, shouldExit: boolean): void {
+  const normalized = error instanceof Error ? error : new Error(String(error))
+  const detail = `${normalized.message}\n\n${normalized.stack || ''}`
+  console.error(title, normalized)
   const choice = dialog.showMessageBoxSync({
     type: 'error',
-    title: 'Error',
-    message: 'A JavaScript error occurred in the main process',
+    title,
+    message,
     detail,
-    buttons: ['Copy Error & Close', 'Close'],
+    buttons: ['Copy Error', shouldExit ? 'Close' : 'Dismiss'],
     defaultId: 0
   })
-  if (choice === 0) {
-    clipboard.writeText(detail)
-  }
-  app.exit(1)
+  if (choice === 0) clipboard.writeText(detail)
+  if (shouldExit) app.exit(1)
+}
+
+// Show copyable error dialog for uncaught exceptions
+process.on('uncaughtException', (error) => {
+  showMainProcessError(
+    'Error',
+    'A JavaScript error occurred in the main process',
+    error,
+    true
+  )
+})
+
+process.on('unhandledRejection', (reason) => {
+  showMainProcessError(
+    'Unhandled Promise Rejection',
+    'A background task failed in the main process',
+    reason,
+    false
+  )
 })
 
 function createWindow(): void {
@@ -57,6 +76,8 @@ function createWindow(): void {
     shell.openExternal(details.url)
     return { action: 'deny' }
   })
+
+  setupAgent(mainWindow)
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
@@ -221,6 +242,7 @@ Transcript: "${transcript}"`
 })
 
 app.on('will-quit', () => {
+  clearTrackedTempFiles()
   clearNormalizedCache()
 })
 

@@ -14,7 +14,7 @@ import {
 } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import { useWhisper, WhisperChunk } from '@/hooks/useWhisper'
-import { detectMarkers, DetectedMarker } from '@/lib/marker-detection'
+import { detectMarkers, DetectedMarker } from '../../../shared/marker-detection'
 import { useStore, BucketType, Clip, WordChunk } from '../store'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -179,12 +179,14 @@ export function ClipSplitter() {
   }, [])
 
   const runTranscription = async (path: string, duration: number) => {
+    let wavPath: string | null = null
     try {
       if (!isModelReady) {
         await loadModel(whisperModel)
       }
-      const wavPath = await window.api.extractAudio(path)
+      wavPath = await window.api.extractAudio(path)
       const audioBuffer = await window.api.readAudioBuffer(wavPath)
+      wavPath = null
       const audioData = new Float32Array(audioBuffer)
       const { chunks, speechIntervals } = await transcribe(audioData, whisperModel)
       setWordChunks(chunks)
@@ -193,6 +195,7 @@ export function ClipSplitter() {
       setMarkers(detected)
       setStep('review')
     } catch (err) {
+      if (wavPath) await window.api.releaseTempFile(wavPath)
       setError(err instanceof Error ? err.message : String(err))
       setStep('upload')
     }
