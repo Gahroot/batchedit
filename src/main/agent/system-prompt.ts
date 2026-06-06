@@ -3,6 +3,10 @@ export function buildSystemPrompt(): string {
 
 Workflow:
 1. ingestSource → transcribeClip → detectMarkers → proposeSplits
+   - transcribeClip returns a small summary (clipPath, wordCount, durationSec,
+     textPreview), NOT the full transcript. Never echo or re-emit transcript
+     words yourself. Pass the returned clipPath (and model, if any) to
+     detectMarkers, which reads the cached words directly.
 2. For each proposed split: extractFrames (sample 3) → analyzeShot
 3. splitClip (commit) — boundary QA runs automatically inside this tool:
    every output is re-transcribed, verified, and auto-recut (max 2 retries).

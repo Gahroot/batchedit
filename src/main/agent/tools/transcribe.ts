@@ -66,7 +66,17 @@ export function createTranscribeClipTool(ctx: ToolContextState): BatchEditAgentT
         throw new Error('Path was not returned by ingestSource or splitClip')
       }
       const result = await transcribeClipWithRenderer(ctx, args.path, args.model, toolContext.signal)
-      return stringifyToolResult(result)
+      // Do NOT return the full word-level transcript to the model. It can be
+      // hundreds of word objects; some models echo it back verbatim and blow the
+      // stream timeout. The full transcript stays cached server-side — pass this
+      // clipPath to detectMarkers, which reads the cached words directly.
+      return stringifyToolResult({
+        clipPath: args.path,
+        ...(args.model ? { model: args.model } : {}),
+        wordCount: result.words.length,
+        durationSec: result.words.at(-1)?.end ?? 0,
+        textPreview: result.full.slice(0, 280)
+      })
     }
   }
 }

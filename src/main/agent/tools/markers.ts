@@ -1,14 +1,9 @@
 import { z } from 'zod'
 import { detectMarkers } from '../../../shared/marker-detection'
-import type { BucketType, DetectedMarker, WordChunk } from '../../../shared/types'
+import { readTranscriptCache } from '../transcript-cache'
+import type { BucketType, DetectedMarker } from '../../../shared/types'
 import type { BatchEditAgentTool } from './types'
 import { stringifyToolResult } from './types'
-
-const wordChunkSchema = z.object({
-  text: z.string(),
-  start: z.number(),
-  end: z.number()
-})
 
 const detectedMarkerSchema = z.object({
   id: z.string(),
@@ -20,9 +15,9 @@ const detectedMarkerSchema = z.object({
 })
 
 const detectMarkersSchema = z.object({
-  words: z.array(wordChunkSchema),
-  fullDuration: z.number().optional(),
-  speechIntervals: z.array(z.object({ start: z.number(), end: z.number() })).optional()
+  clipPath: z.string(),
+  model: z.string().optional(),
+  fullDuration: z.number().optional()
 })
 
 const proposeSplitsSchema = z.object({
@@ -60,11 +55,15 @@ export function proposeSplitsFromMarkers(markers: DetectedMarker[], fullDuration
 export function createDetectMarkersTool(): BatchEditAgentTool {
   return {
     name: 'detectMarkers',
-    description: 'Detect Hook, Meat, and CTA marker phrases from word-level transcript chunks.',
+    description: 'Detect Hook, Meat, and CTA marker phrases from the transcript cached by transcribeClip. Pass the clipPath (and model, if used) returned by transcribeClip.',
     parameters: detectMarkersSchema,
-    execute(args) {
-      const fullDuration = args.fullDuration ?? args.words.at(-1)?.end ?? 0
-      const markers = detectMarkers(args.words as WordChunk[], fullDuration, args.speechIntervals ?? [])
+    async execute(args) {
+      const cached = await readTranscriptCache(args.clipPath, args.model)
+      if (!cached) {
+        throw new Error('No cached transcript for clipPath; call transcribeClip first')
+      }
+      const fullDuration = args.fullDuration ?? cached.words.at(-1)?.end ?? 0
+      const markers = detectMarkers(cached.words, fullDuration, cached.speechIntervals ?? [])
       return stringifyToolResult({ markers })
     }
   }
