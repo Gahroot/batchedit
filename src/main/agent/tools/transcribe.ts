@@ -24,6 +24,11 @@ export interface TranscribeClipResult {
   speechIntervals?: SpeechInterval[]
 }
 
+// Whisper model load + full transcription + gap re-transcription + VAD on a long
+// clip routinely runs for several minutes, far beyond callRenderer's 60s default.
+// Cap generously so long sources don't fail with a misleading "tool failure".
+const TRANSCRIBE_RPC_TIMEOUT_MS = 30 * 60_000
+
 function fullText(words: WordChunk[]): string {
   return words.map((word) => word.text).join(' ').trim()
 }
@@ -38,7 +43,7 @@ export async function transcribeClipWithRenderer(
   if (cached) return cached
 
   const startedAt = Date.now()
-  const raw = await callRenderer<unknown>(ctx.win, 'agent:transcribe', { path, model }, signal)
+  const raw = await callRenderer<unknown>(ctx.win, 'agent:transcribe', { path, model }, signal, TRANSCRIBE_RPC_TIMEOUT_MS)
   const parsed = rendererTranscribeResultSchema.parse(raw)
   const result: TranscribeClipResult = {
     words: parsed.words,
