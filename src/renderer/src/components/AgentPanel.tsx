@@ -2,6 +2,8 @@ import { AlertCircle, Bot, CheckCircle2, Clock, Copy, Loader2, Play, Square } fr
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { getAgentModel } from '../agent-models'
+import { QaPanel } from './QaPanel'
 import { useStore } from '../store'
 
 const DETAIL_PREVIEW_LIMIT = 1200
@@ -109,6 +111,8 @@ export function AgentPanel() {
   const events = useStore((state) => state.agentEvents)
   const appendAgentEvent = useStore((state) => state.appendAgentEvent)
   const geminiApiKey = useStore((state) => state.geminiApiKey)
+  const xiaomiApiKey = useStore((state) => state.xiaomiApiKey)
+  const agentModelId = useStore((state) => state.agentModelId)
 
   const chooseAndRun = async (): Promise<void> => {
     try {
@@ -116,11 +120,13 @@ export function AgentPanel() {
       const path = paths[0]
       if (!path) return
       setSourcePath(path)
+      const selected = getAgentModel(agentModelId)
+      const apiKey = selected.keyKind === 'xiaomi' ? xiaomiApiKey : geminiApiKey
       const result = await window.api.agent.start({
         sourcePath: path,
-        provider: 'google',
-        model: 'gemini-3.5-flash',
-        apiKey: geminiApiKey || undefined
+        provider: selected.provider,
+        model: selected.model,
+        apiKey: apiKey || undefined
       })
       setRunId(result.runId)
     } catch (error) {
@@ -172,6 +178,7 @@ export function AgentPanel() {
           </Button>
         ) : null}
       </div>
+      <QaPanel />
       <ScrollArea className="flex-1 p-4">
         <div className="space-y-2">
           {events.length === 0 ? (

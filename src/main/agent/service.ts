@@ -2,8 +2,10 @@ import { Agent, setStreamDiagnostic, type AgentEvent } from '@prestyj/agent'
 import type { BrowserWindow } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import { ProviderError, providerRegistry, type Provider } from '@prestyj/ai'
+import { manualRecutClip, type ManualRecutParams } from './boundary-qa'
 import { createGoogleProviderEntry, GEMINI_FLASH_MODEL, GOOGLE_PROVIDER } from './google-provider'
 import { JobLedger } from './job-ledger'
+import type { ClipQaResult } from '../../shared/types'
 import { buildSystemPrompt } from './system-prompt'
 import { buildTools } from './tools'
 import type { ToolContextState } from './tools/types'
@@ -25,6 +27,17 @@ interface ErrorDiagnostics {
 }
 
 if (!providerRegistry.has(GOOGLE_PROVIDER)) providerRegistry.register(GOOGLE_PROVIDER, createGoogleProviderEntry())
+
+/** Built-in @prestyj/ai provider name for Xiaomi MiMo (OpenAI-compatible Token Plan endpoint). */
+const XIAOMI_PROVIDER = 'xiaomi'
+
+/** Resolve the API key from the environment for a provider when none is passed explicitly. */
+function envKeyForProvider(provider: AgentProvider): string | undefined {
+  if (provider === XIAOMI_PROVIDER) {
+    return process.env.XIAOMI_API_KEY ?? process.env.MIMO_API_KEY
+  }
+  return process.env.GEMINI_API_KEY
+}
 
 function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
@@ -73,7 +86,11 @@ export interface AgentStartResult {
 export class AgentService {
   private readonly win: BrowserWindow
   private readonly jobLedger = new JobLedger()
-  private currentRun: { runId: string; controller: AbortController } | null = null
+  private currentRun: {
+    runId: string
+    controller: AbortController
+    ctx: ToolContextState
+  } | null = null
 
   constructor(win: BrowserWindow) {
     this.win = win
@@ -87,22 +104,25 @@ export class AgentService {
     if (this.currentRun) throw new Error('Agent is already running')
     const runId = uuidv4()
     const controller = new AbortController()
-    this.currentRun = { runId, controller }
+    const provider = options.provider ?? GOOGLE_PROVIDER
+    const model = options.model ?? GEMINI_FLASH_MODEL
+    const apiKey = options.apiKey ?? envKeyForProvider(provider)
     const ctx: ToolContextState = {
       win: this.win,
       sourceAllowlist: new Set<string>(),
       clipAllowlist: new Set<string>(),
       approvedRenderAtTurn: null,
       jobLedger: this.jobLedger,
-      apiKey: options.apiKey ?? process.env.GEMINI_API_KEY,
-      provider: options.provider ?? GOOGLE_PROVIDER,
-      model: options.model ?? GEMINI_FLASH_MODEL,
+      apiKey,
+      provider,
+      model,
       runId
     }
+    this.currentRun = { runId, controller, ctx }
     const agent = new Agent({
-      provider: (options.provider ?? GOOGLE_PROVIDER) as Provider,
-      model: options.model ?? GEMINI_FLASH_MODEL,
-      apiKey: options.apiKey ?? process.env.GEMINI_API_KEY,
+      provider: provider as Provider,
+      model,
+      apiKey,
       system: buildSystemPrompt(),
       tools: buildTools(ctx),
       maxTurns: 80,
@@ -115,6 +135,16 @@ export class AgentService {
     })
 
     return { runId }
+  }
+
+  /**
+   * Apply a human nudge from the QA panel against the active run's context.
+   * The clip's source bounds come from the renderer (carried on the qa_clip
+   * event), so this only needs to re-cut and re-verify under the run allowlist.
+   */
+  async qaRecut(params: ManualRecutParams): Promise<ClipQaResult> {
+    if (!this.currentRun) throw new Error('No active agent run')
+    return manualRecutClip(this.currentRun.ctx, params, this.currentRun.controller.signal)
   }
 
   cancel(runId: string): void {

@@ -3,6 +3,7 @@ import { basename, extname, join } from 'path'
 import { z } from 'zod'
 import { getVideoMetadata, trimVideo, trimVideoReencode } from '../../ffmpeg'
 import type { BucketType } from '../../../shared/types'
+import { runBoundaryQA } from '../boundary-qa'
 import type { BatchEditAgentTool, ToolContextState } from './types'
 import { stringifyToolResult } from './types'
 
@@ -31,6 +32,8 @@ export interface SplitClipResult {
   bucket: BucketType
   path: string
   duration: number
+  sourceStart: number
+  sourceEnd: number
 }
 
 function safeFileName(value: string): string {
@@ -66,7 +69,14 @@ export async function splitSourceClip(
       ok: true,
       elapsedMs: Date.now() - startedAt
     })
-    clips.push({ label: segment.label, bucket: segment.bucket, path: outputPath, duration: metadata.duration })
+    clips.push({
+      label: segment.label,
+      bucket: segment.bucket,
+      path: outputPath,
+      duration: metadata.duration,
+      sourceStart: segment.start,
+      sourceEnd: segment.end
+    })
   }
   return clips
 }
@@ -97,10 +107,28 @@ export function createSplitClipTool(ctx: ToolContextState): BatchEditAgentTool {
     description: 'Split a source video into labeled bucket clips using existing FFmpeg trimming.',
     parameters: splitClipSchema,
     executionMode: 'sequential',
-    async execute(args) {
+    async execute(args, toolContext) {
       if (!ctx.sourceAllowlist.has(args.sourcePath)) throw new Error('sourcePath was not returned by ingestSource')
       const clips = await splitSourceClip(args.sourcePath, args.segments, args.outDir, ctx)
-      return stringifyToolResult({ clips })
+      // Boundary QA is mandatory: every split is verified and auto-recut here
+      // before the agent ever sees the clips, so contamination never reaches
+      // the buckets silently.
+      const report = await runBoundaryQA(
+        ctx,
+        args.sourcePath,
+        clips,
+        // Whisper model is left to the renderer's configured default.
+        {},
+        toolContext.signal
+      )
+      return stringifyToolResult({
+        clips: report.clips,
+        qa: {
+          cleanCount: report.cleanCount,
+          autoFixedCount: report.autoFixedCount,
+          flaggedCount: report.flaggedCount
+        }
+      })
     }
   }
 }

@@ -1,4 +1,5 @@
 import { ipcMain, type BrowserWindow } from 'electron'
+import type { ManualRecutParams } from './boundary-qa'
 import { AgentService, type AgentStartOptions } from './service'
 import { setupRendererRpc } from './renderer-rpc'
 import { setupReviewIpc } from './tools/review'
@@ -17,6 +18,11 @@ export function setupAgent(win: BrowserWindow): AgentService {
 
   ipcMain.handle('agent:cancel', async (_event, runId: string) => {
     service?.cancel(runId)
+  })
+
+  ipcMain.handle('agent:qaRecut', async (_event, params: ManualRecutParams) => {
+    if (!service) throw new Error('Agent service is not ready')
+    return service.qaRecut(params)
   })
 
   ipcMain.on('agent:renderProgress', (_event, progress: Array<{ jobId: string; percent: number; status: string; error?: string }>) => {

@@ -1,6 +1,43 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
 
 type Platform = 'tiktok' | 'reels' | 'shorts' | 'universal'
+type BucketType = 'hook' | 'meat' | 'cta'
+type QaStatus = 'clean' | 'auto_fixed' | 'flagged'
+
+interface QaLeak {
+  marker: string
+  matchedTokens: string[]
+  confidence: number
+  suggestedTrimMs: number
+}
+
+interface ClipQaResult {
+  label: string
+  bucket: BucketType
+  path: string
+  originalPath: string
+  sourcePath: string
+  sourceStart: number
+  sourceEnd: number
+  duration: number
+  status: QaStatus
+  recutCount: number
+  confidence: number
+  leadingLeak: QaLeak | null
+  trailingLeak: QaLeak | null
+}
+
+interface QaRecutParams {
+  clipPath: string
+  sourcePath: string
+  sourceStart: number
+  sourceEnd: number
+  bucket: BucketType
+  label: string
+  startDeltaMs: number
+  endDeltaMs: number
+  model?: string
+}
 type ElementType = 'caption' | 'hook_text' | 'upper_third' | 'middle' | 'lower_third' | 'progress_bar' | 'logo' | 'comment_overlay' | 'full_frame'
 
 interface SafeZoneRect {
@@ -111,7 +148,7 @@ type AgentUiEvent = Record<string, unknown> & {
 
 interface AgentStartOptions {
   sourcePath: string
-  provider?: 'google'
+  provider?: 'google' | 'xiaomi'
   model?: string
   apiKey?: string
 }
@@ -165,6 +202,7 @@ interface Api {
     start: (opts: AgentStartOptions) => Promise<{ runId: string }>
     cancel: (runId: string) => Promise<void>
     respondToReview: (reviewId: string, response: { approved: boolean; edits?: unknown }) => Promise<void>
+    qaRecut: (params: QaRecutParams) => Promise<ClipQaResult>
     onEvent: (cb: (evt: AgentUiEvent) => void) => () => void
   }
   agentBridge: {

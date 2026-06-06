@@ -46,6 +46,35 @@ export interface Leak {
   suggestedTrimMs: number
 }
 
+/** Outcome of the mandatory boundary-QA pass for a single split clip. */
+export type QaStatus = 'clean' | 'auto_fixed' | 'flagged'
+
+export interface ClipQaResult {
+  label: string
+  bucket: BucketType
+  /** Current clip path (changes after each auto-recut). */
+  path: string
+  /** Path produced by the original split, before any recut. */
+  originalPath: string
+  sourcePath: string
+  /** Source-relative bounds (seconds) the current clip was cut from. */
+  sourceStart: number
+  sourceEnd: number
+  duration: number
+  status: QaStatus
+  recutCount: number
+  confidence: number
+  leadingLeak: Leak | null
+  trailingLeak: Leak | null
+}
+
+export interface BoundaryQaReport {
+  clips: ClipQaResult[]
+  cleanCount: number
+  autoFixedCount: number
+  flaggedCount: number
+}
+
 export interface TemplateLayout {
   titleText: { x: number; y: number }
   subtitles: { x: number; y: number }

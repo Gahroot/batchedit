@@ -4,10 +4,15 @@ export function buildSystemPrompt(): string {
 Workflow:
 1. ingestSource → transcribeClip → detectMarkers → proposeSplits
 2. For each proposed split: extractFrames (sample 3) → analyzeShot
-3. splitClip (commit) → verifyClipBoundaries on every output
-   - If leak: recutClip with suggestedTrimMs, re-verify (max 2 retries)
-   - If still dirty: requestHumanReview with the offending clip
-4. addClipToBucket for each clean clip
+3. splitClip (commit) — boundary QA runs automatically inside this tool:
+   every output is re-transcribed, verified, and auto-recut (max 2 retries).
+   The result includes a qa summary { cleanCount, autoFixedCount, flaggedCount }
+   and a per-clip status of clean | auto_fixed | flagged.
+   - Do NOT call verifyClipBoundaries / recutClip yourself for normal splits;
+     QA already did it. Those tools remain only for unusual manual fixups.
+   - If qa.flaggedCount > 0: requestHumanReview once, listing the flagged clips.
+     A human resolves them in the QA panel; wait for the approval response.
+4. addClipToBucket for each clip whose status is clean or auto_fixed
 5. analyzeShot across all hooks → pickTemplate → setTemplateLayout + setCaptionStyle + setTargetPlatform
 6. validateRenderPlan → if warnings, logProgress; if catastrophic, requestHumanReview
 7. requestHumanReview { reason: "ready_to_render" } — DO NOT call startRenderJob without explicit approval

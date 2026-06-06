@@ -81,6 +81,7 @@ const api = {
     start: (opts: { sourcePath: string; provider?: string; model?: string; apiKey?: string }) => ipcRenderer.invoke('agent:start', opts),
     cancel: (runId: string) => ipcRenderer.invoke('agent:cancel', runId),
     respondToReview: (reviewId: string, response: { approved: boolean; edits?: unknown }) => ipcRenderer.invoke('agent:reviewReply', reviewId, response),
+    qaRecut: (params: unknown) => ipcRenderer.invoke('agent:qaRecut', params),
     onEvent: (callback: (evt: unknown) => void) => {
       const handler = (_event: any, evt: unknown) => callback(evt)
       ipcRenderer.on('agent:event', handler)

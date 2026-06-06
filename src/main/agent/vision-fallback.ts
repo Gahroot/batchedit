@@ -47,12 +47,16 @@ function parseJsonObject(text: string): unknown {
 
 export async function classifyShotsWithVision(options: VisionFallbackOptions): Promise<ShotAnalysis[]> {
   const startedAt = Date.now()
+  const provider = (options.provider ?? GOOGLE_PROVIDER) as Provider
   const result = stream({
-    provider: (options.provider ?? GOOGLE_PROVIDER) as Provider,
+    provider,
     model: options.model ?? GEMINI_FLASH_MODEL,
     apiKey: options.apiKey,
     signal: options.signal,
     maxTokens: 1000,
+    // OpenAI-compatible providers (e.g. Xiaomi MiMo) downgrade image parts unless
+    // told the model is multimodal. The custom Gemini provider ignores this flag.
+    supportsImages: provider !== GOOGLE_PROVIDER,
     messages: [
       {
         role: 'user',
