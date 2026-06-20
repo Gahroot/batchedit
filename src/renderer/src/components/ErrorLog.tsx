@@ -14,7 +14,9 @@ function formatTime(ts: number): string {
 function formatEntry(entry: ErrorLogEntry): string {
   const time = formatTime(entry.timestamp)
   const src = entry.source === 'caption' ? 'CAP' : entry.source === 'hooktext' ? 'AI' : 'REN'
-  return `[${time}] [${src}] ${entry.clipName}: ${entry.message}`
+  const head = `[${time}] [${src}] ${entry.clipName}: ${entry.message}`
+  // Append the raw technical detail (e.g. FFmpeg stderr) for bug reports.
+  return entry.detail ? `${head}\n${entry.detail}` : head
 }
 
 export function ErrorLog() {

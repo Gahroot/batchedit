@@ -34,6 +34,8 @@ export interface RenderProgress {
   percent: number
   status: RenderProgressStatus
   error?: string
+  /** Raw FFmpeg/ffprobe output, kept for bug reports (e.g. behind a Copy affordance). */
+  errorDetail?: string
 }
 
 export interface Combo {
@@ -63,6 +65,8 @@ export interface ErrorLogEntry {
   source: 'caption' | 'render' | 'hooktext'
   clipName: string
   message: string
+  /** Raw technical detail (e.g. FFmpeg stderr) kept for bug reports / Copy. */
+  detail?: string
 }
 
 export type AgentEvent = Record<string, unknown> & { type?: string; runId?: string }

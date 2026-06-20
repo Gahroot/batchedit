@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Play, Loader2, Captions, Crop, Scissors, Brain, Square } from 'lucide-react'
 import { useStore, RenderProgress, WHISPER_MODELS, getWhisperModelInfo } from '../store'
+import { humanizeFfmpegError } from '../../../shared/ffmpeg-error-hints'
 import { useWhisper } from '@/hooks/useWhisper'
 import { WhisperStatus } from './WhisperStatus'
 import { ErrorLog } from './ErrorLog'
@@ -282,12 +283,14 @@ export function RenderPanel() {
       setRenderProgress(returnedProgress)
     } catch (err) {
       console.error('Render failed:', err)
-      const message = err instanceof Error ? err.message : String(err)
+      const raw = err instanceof Error ? err.message : String(err)
+      const { hint, raw: detail } = humanizeFfmpegError(raw)
       for (const job of jobs) {
         addError({
           source: 'render',
           clipName: job.outputPath.split(/[/\\]/).pop() || job.id,
-          message
+          message: hint,
+          detail
         })
       }
     } finally {
@@ -309,7 +312,8 @@ export function RenderPanel() {
           addError({
             source: 'render',
             clipName: outputName,
-            message: rp.error || 'Unknown render error'
+            message: rp.error || 'Unknown render error',
+            ...(rp.errorDetail ? { detail: rp.errorDetail } : {})
           })
         }
       }

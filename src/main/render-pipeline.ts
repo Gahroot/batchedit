@@ -6,6 +6,7 @@ import { writeFileSync, mkdirSync, unlinkSync, readFileSync, existsSync, statSyn
 import { tmpdir, cpus } from 'os'
 import { v4 as uuidv4 } from 'uuid'
 import { clampToSafeZone, getElementPlacement, CANVAS_WIDTH, CANVAS_HEIGHT, type Platform } from './safe-zones'
+import { humanizeFfmpegError } from '../shared/ffmpeg-error-hints'
 
 function getFontsDir(): string {
   if (app.isPackaged) {
@@ -173,7 +174,10 @@ export interface RenderProgress {
   jobId: string
   percent: number
   status: RenderProgressStatus
+  /** Plain-language, actionable message for the user. */
   error?: string
+  /** Raw FFmpeg/ffprobe output, kept for bug reports (e.g. behind a Copy affordance). */
+  errorDetail?: string
 }
 
 type FfmpegCommand = ffmpegModule.FfmpegCommand
@@ -942,8 +946,10 @@ export function setupRenderPipeline(): void {
             r.status = 'canceled'
             r.error = 'Render canceled'
           } else {
+            const humanized = humanizeFfmpegError(error.message, 'Normalization failed')
             r.status = 'error'
-            r.error = `Normalization failed: ${error.message}`
+            r.error = humanized.hint
+            r.errorDetail = humanized.raw
           }
         }
         sendProgress({ force: true })
@@ -1059,8 +1065,10 @@ export function setupRenderPipeline(): void {
             results[idx].error = 'Render canceled'
             try { unlinkSync(job.outputPath) } catch {}
           } else {
+            const humanized = humanizeFfmpegError(error.message)
             results[idx].status = 'error'
-            results[idx].error = error.message
+            results[idx].error = humanized.hint
+            results[idx].errorDetail = humanized.raw
           }
         }
 
