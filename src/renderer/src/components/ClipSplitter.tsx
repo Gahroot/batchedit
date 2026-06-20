@@ -267,6 +267,10 @@ export function ClipSplitter() {
   const [alsoAddToBuckets, setAlsoAddToBuckets] = useState(true)
   // Reflects whether clips were actually added to buckets, shown on the done screen.
   const [addedToBuckets, setAddedToBuckets] = useState(false)
+  // When true, the pending push/save included clips still flagged for review.
+  const [includedFlagged, setIncludedFlagged] = useState(false)
+  // When true, the skip-confirmation panel is shown before clips are dropped.
+  const [confirmingPush, setConfirmingPush] = useState(false)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const dropRef = useRef<HTMLDivElement>(null)
@@ -294,6 +298,8 @@ export function ClipSplitter() {
       setSplitAction(null)
       setAlsoAddToBuckets(true)
       setAddedToBuckets(false)
+      setIncludedFlagged(false)
+      setConfirmingPush(false)
     }
   }, [open])
 
@@ -506,10 +512,25 @@ export function ClipSplitter() {
     })
   }, [])
 
-  // Adds the approved QA clips into their Hook/Meat/CTA buckets. Returns how many were added.
-  const addApprovedClipsToBuckets = useCallback(async (): Promise<number> => {
+  // Counts clips that are flagged for review and not yet approved — these are the
+  // ones that would be silently dropped from a push/save unless the user opts in.
+  const skippedCount = qaResults.filter(
+    (r) => r.status === 'flagged' && !approvedClips.has(r.originalPath)
+  ).length
+  const pushableCount = qaResults.filter(
+    (r) => r.status === 'clean' || r.status === 'auto_fixed' || approvedClips.has(r.originalPath)
+  ).length
+
+  // Adds QA clips into their Hook/Meat/CTA buckets. When includeFlagged is true,
+  // clips still flagged for review are added too (instead of being dropped).
+  // Returns how many were added.
+  const addApprovedClipsToBuckets = useCallback(async (includeFlagged: boolean): Promise<number> => {
     const approved = qaResults.filter(
-      (r) => r.status === 'clean' || r.status === 'auto_fixed' || approvedClips.has(r.originalPath)
+      (r) =>
+        includeFlagged ||
+        r.status === 'clean' ||
+        r.status === 'auto_fixed' ||
+        approvedClips.has(r.originalPath)
     )
     if (approved.length === 0) return 0
 
@@ -544,21 +565,37 @@ export function ClipSplitter() {
     return approved.length
   }, [qaResults, approvedClips, addClips])
 
-  const handleFinalPush = useCallback(async () => {
-    const added = await addApprovedClipsToBuckets()
+  // Performs the actual bucket push and advances to the done screen.
+  const runPush = useCallback(async (includeFlagged: boolean) => {
+    const added = await addApprovedClipsToBuckets(includeFlagged)
     setAddedToBuckets(added > 0)
+    setIncludedFlagged(includeFlagged)
+    setConfirmingPush(false)
     setStep('done')
   }, [addApprovedClipsToBuckets])
 
+  const handleFinalPush = useCallback(async () => {
+    // Don't silently drop flagged clips — ask the user first.
+    if (skippedCount > 0) {
+      setConfirmingPush(true)
+      return
+    }
+    await runPush(false)
+  }, [skippedCount, runPush])
+
   const handleFinalSave = useCallback(async () => {
     if (alsoAddToBuckets) {
-      const added = await addApprovedClipsToBuckets()
-      setAddedToBuckets(added > 0)
-    } else {
-      setAddedToBuckets(false)
+      if (skippedCount > 0) {
+        setConfirmingPush(true)
+        return
+      }
+      await runPush(false)
+      return
     }
+    setAddedToBuckets(false)
+    setIncludedFlagged(false)
     setStep('done')
-  }, [alsoAddToBuckets, addApprovedClipsToBuckets])
+  }, [alsoAddToBuckets, skippedCount, runPush])
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -975,6 +1012,53 @@ export function ClipSplitter() {
                   </div>
                 </ScrollArea>
 
+                {/* Surface dropped clips at decision time, not just on the done screen. */}
+                {skippedCount > 0 && (splitAction === 'push' || alsoAddToBuckets) && (
+                  <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      {skippedCount} clip{skippedCount === 1 ? '' : 's'} still flagged for review
+                      {' '}will be skipped unless you approve {skippedCount === 1 ? 'it' : 'them'} above or
+                      choose to include {skippedCount === 1 ? 'it' : 'them'}.
+                    </span>
+                  </div>
+                )}
+
+                {confirmingPush ? (
+                  <div className="flex flex-col gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+                    <div className="flex items-start gap-2 text-xs text-amber-600">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <span className="font-medium">
+                        {skippedCount} of {qaResults.length} clip{qaResults.length === 1 ? '' : 's'} are still
+                        flagged for review. Push only the {pushableCount} ready clip
+                        {pushableCount === 1 ? '' : 's'}, or include the flagged ones too?
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-end gap-2">
+                      <Button variant="ghost" size="sm" onClick={() => setConfirmingPush(false)}>
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5"
+                        onClick={() => runPush(true)}
+                      >
+                        <AlertTriangle className="h-3.5 w-3.5" />
+                        Include flagged ({qaResults.length})
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="gap-1.5"
+                        disabled={pushableCount === 0}
+                        onClick={() => runPush(false)}
+                      >
+                        <ArrowRight className="h-3.5 w-3.5" />
+                        Skip flagged, push {pushableCount}
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
                 <div className="flex items-center justify-end gap-3 pt-1">
                   {splitAction === 'save' && (
                     <label className="mr-auto flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
@@ -988,11 +1072,7 @@ export function ClipSplitter() {
                   {splitAction === 'push' && (
                     <Button
                       onClick={handleFinalPush}
-                      disabled={
-                        qaResults.filter(
-                          (r) => r.status === 'clean' || r.status === 'auto_fixed' || approvedClips.has(r.originalPath)
-                        ).length === 0
-                      }
+                      disabled={pushableCount === 0 && skippedCount === 0}
                       className="gap-1.5"
                     >
                       <ArrowRight className="w-4 h-4" />
@@ -1009,6 +1089,7 @@ export function ClipSplitter() {
                     Close
                   </Button>
                 </div>
+                )}
               </>
             )}
           </div>
@@ -1022,7 +1103,7 @@ export function ClipSplitter() {
               <p className="text-sm font-medium">
                 {splitAction === 'save'
                   ? `Saved ${splitResults.length} clips to disk`
-                  : `Pushed ${qaResults.filter((r) => r.status === 'clean' || r.status === 'auto_fixed' || approvedClips.has(r.originalPath)).length} clips to buckets`}
+                  : `Pushed ${includedFlagged ? qaResults.length : pushableCount} clips to buckets`}
               </p>
               <p className="text-xs text-muted-foreground mt-1">
                 {addedToBuckets
@@ -1039,7 +1120,11 @@ export function ClipSplitter() {
                     <span className={BUCKET_COLORS_TEXT[r.bucket]}>{r.label}</span>
                     {' \u2192 '}
                     {r.bucket}
-                    {r.status === 'flagged' && !approvedClips.has(r.originalPath) ? ' (skipped)' : ''}
+                    {r.status === 'flagged' && !approvedClips.has(r.originalPath)
+                      ? includedFlagged && addedToBuckets
+                        ? ' (flagged — review)'
+                        : ' (skipped)'
+                      : ''}
                   </div>
                 ))}
               </div>
