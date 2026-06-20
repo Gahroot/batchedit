@@ -200,6 +200,7 @@ interface Api {
   generateHookText: (apiKey: string, transcript: string) => Promise<string>
   saveProject: (projectData: string) => Promise<string | null>
   loadProject: () => Promise<string | null>
+  pathsExist: (paths: string[]) => Promise<{ missing: string[] }>
   getSafeZone: (platform: Platform) => Promise<SafeZoneRect>
   getDeadZones: (platform: Platform) => Promise<PlatformDeadZones>
   getElementPlacement: (platform: Platform, element: ElementType) => Promise<SafeZoneRect>

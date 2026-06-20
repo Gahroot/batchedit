@@ -12,6 +12,8 @@ export interface Clip {
   duration: number
   thumbnail?: string
   transcript?: WordChunk[]
+  /** Set when the source file is missing on disk (moved/renamed since save). */
+  missing?: boolean
 }
 
 export interface ProjectSettings {
@@ -107,7 +109,7 @@ export interface ReviewResponse {
 }
 
 export type LoadProjectResult =
-  | { ok: true }
+  | { ok: true; missingCount: number }
   | { ok: false; reason: 'cancelled' | 'corrupt' }
 
 export type CaptionAnimation = 'karaoke-fill' | 'word-pop' | 'fade-in' | 'glow'
@@ -488,7 +490,7 @@ export const useStore = create<AppState>((set, get) => ({
       return {
         [key]: state[key].map((c) =>
           c.id === clipId
-            ? { ...c, path: newPath, duration: newDuration, ...(thumbnail !== undefined && { thumbnail }) }
+            ? { ...c, path: newPath, duration: newDuration, missing: false, ...(thumbnail !== undefined && { thumbnail }) }
             : c
         )
       }
@@ -555,10 +557,30 @@ export const useStore = create<AppState>((set, get) => ({
     if (!data) return { ok: false, reason: 'cancelled' }
     try {
       const project = JSON.parse(data)
+      const hooks: Clip[] = project.hooks || []
+      const meats: Clip[] = project.meats || []
+      const ctas: Clip[] = project.ctas || []
+
+      // Flag clips whose source files moved/renamed since the project was saved
+      // so they can be relinked or removed before a render fails on a dead path.
+      const allPaths = [...hooks, ...meats, ...ctas].map((c) => c.path)
+      let missingSet = new Set<string>()
+      try {
+        const { missing } = await window.api.pathsExist(allPaths)
+        missingSet = new Set(missing)
+      } catch {
+        // If the existence check fails, fall back to loading without flags.
+      }
+      const markMissing = (clips: Clip[]): Clip[] =>
+        clips.map((c) => ({ ...c, missing: missingSet.has(c.path) }))
+      const missingCount = [...hooks, ...meats, ...ctas].filter((c) =>
+        missingSet.has(c.path)
+      ).length
+
       set({
-        hooks: project.hooks || [],
-        meats: project.meats || [],
-        ctas: project.ctas || [],
+        hooks: markMissing(hooks),
+        meats: markMissing(meats),
+        ctas: markMissing(ctas),
         hookTexts: project.hookTexts || {},
         settings: project.settings || { resolution: RESOLUTIONS['9:16'], outputDirectory: null },
         captionStyle: project.captionStyle || CAPTION_PRESETS['hormozi-bold'],
@@ -575,7 +597,7 @@ export const useStore = create<AppState>((set, get) => ({
         agentReviewPrompt: null,
         qaClips: []
       })
-      return { ok: true }
+      return { ok: true, missingCount }
     } catch {
       return { ok: false, reason: 'corrupt' }
     }

@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, X, Type, FileVideo, Sparkles, Loader2, Image, Pencil } from 'lucide-react'
+import { Plus, X, Type, FileVideo, Sparkles, Loader2, Image, Pencil, AlertTriangle } from 'lucide-react'
 import { useStore, BucketType, Clip } from '../store'
 import { useWhisper } from '../hooks/useWhisper'
 import { cn } from '../lib/utils'
@@ -376,10 +376,27 @@ export function Bucket({ type, label, color }: BucketProps) {
                           <ContextMenu>
                             <ContextMenuTrigger asChild>
                           <div
-                            className="group flex flex-col gap-1.5 p-2.5 rounded-md bg-secondary/50 hover:bg-secondary transition-colors"
+                            className={cn(
+                              'group flex flex-col gap-1.5 p-2.5 rounded-md bg-secondary/50 hover:bg-secondary transition-colors',
+                              clip.missing && 'ring-1 ring-destructive/60 bg-destructive/5'
+                            )}
                             onDoubleClick={() => { if (!isRendering) setEditingClipId(clip.id) }}
                           >
                             <div className="flex items-center gap-2">
+                              {clip.missing && (
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span className="shrink-0">
+                                        <AlertTriangle className="w-4 h-4 text-destructive" />
+                                      </span>
+                                    </TooltipTrigger>
+                                    <TooltipContent>
+                                      Source file missing — relink or remove before rendering
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              )}
                               {clip.thumbnail ? (
                                 <img
                                   src={clip.thumbnail}

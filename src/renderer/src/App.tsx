@@ -39,6 +39,13 @@ function App() {
     const result = await loadProject()
     if (result.ok) {
       toast.success('Project loaded')
+      if (result.missingCount > 0) {
+        const n = result.missingCount
+        toast.warning(
+          `${n} clip${n === 1 ? '' : 's'} missing — source file${n === 1 ? '' : 's'} moved or renamed`,
+          { description: 'Relink or remove the flagged clips before rendering.', duration: 10000 }
+        )
+      }
     } else if (result.reason === 'corrupt') {
       toast.error("Couldn't load project file — it may be corrupt")
     }

@@ -4,6 +4,7 @@ import { join } from 'path'
 import { readFile, writeFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupFFmpeg, getFFmpegReadiness } from './ffmpeg'
+import { findMissingPaths } from './fs-paths'
 import { setupRenderPipeline, clearNormalizedCache, clearTrackedTempFiles } from './render-pipeline'
 import { setupAgent } from './agent/ipc'
 import { setupQaIpc } from './qa-ipc'
@@ -255,6 +256,14 @@ Transcript: "${transcript}"`
     if (result.canceled || !result.filePath) return null
     await writeFile(result.filePath, projectData, 'utf-8')
     return result.filePath
+  })
+
+  // IPC: Report which of the given paths are missing on disk (moved/renamed
+  // source clips). Used at project-load time to flag dead clips before render.
+  ipcMain.handle('fs:pathsExist', async (_event, paths: string[]) => {
+    if (!Array.isArray(paths)) return { missing: [] }
+    const missing = await findMissingPaths(paths.filter((p) => typeof p === 'string'))
+    return { missing }
   })
 
   // IPC: Load project file

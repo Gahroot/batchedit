@@ -70,6 +70,9 @@ const api = {
   saveProject: (projectData: string) => ipcRenderer.invoke('project:save', projectData),
   loadProject: () => ipcRenderer.invoke('project:load'),
 
+  // Filesystem
+  pathsExist: (paths: string[]) => ipcRenderer.invoke('fs:pathsExist', paths),
+
   // Safe zones
   getSafeZone: (platform: string) => ipcRenderer.invoke('safezones:getSafeZone', platform),
   getDeadZones: (platform: string) => ipcRenderer.invoke('safezones:getDeadZones', platform),
