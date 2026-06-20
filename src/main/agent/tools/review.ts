@@ -23,15 +23,24 @@ const requestHumanReviewSchema = z.object({
 interface PendingReview {
   resolve: (response: { approved: boolean; edits?: unknown }) => void
   reject: (error: Error) => void
+  timeout: ReturnType<typeof setTimeout>
 }
 
 const pendingReviews = new Map<string, PendingReview>()
 let reviewIpcRegistered = false
 
+/**
+ * Safety net: if the renderer never replies (window closed mid-review, IPC
+ * dropped), auto-reject so the agent's promise resolves instead of hanging the
+ * run forever. The modal itself maps dismissal to a rejection well before this.
+ */
+const REVIEW_TIMEOUT_MS = 30 * 60 * 1000
+
 export function resolveHumanReview(reviewId: string, response: { approved: boolean; edits?: unknown }): boolean {
   const review = pendingReviews.get(reviewId)
   if (!review) return false
   pendingReviews.delete(reviewId)
+  clearTimeout(review.timeout)
   review.resolve(response)
   return true
 }
@@ -63,7 +72,10 @@ export function createReviewTools(ctx: ToolContextState): BatchEditAgentTool[] {
       async execute(args) {
         const reviewId = uuidv4()
         const response = await new Promise<{ approved: boolean; edits?: unknown }>((resolve, reject) => {
-          pendingReviews.set(reviewId, { resolve, reject })
+          const timeout = setTimeout(() => {
+            if (pendingReviews.delete(reviewId)) resolve({ approved: false })
+          }, REVIEW_TIMEOUT_MS)
+          pendingReviews.set(reviewId, { resolve, reject, timeout })
           if (isWindowAlive(ctx.win)) {
             ctx.win.webContents.send('agent:event', {
               runId: ctx.runId,
