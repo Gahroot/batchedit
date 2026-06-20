@@ -375,7 +375,10 @@ export function Bucket({ type, label, color }: BucketProps) {
                         <SortableClip id={clip.id} disabled={isRendering}>
                           <ContextMenu>
                             <ContextMenuTrigger asChild>
-                          <div className="group flex flex-col gap-1.5 p-2.5 rounded-md bg-secondary/50 hover:bg-secondary transition-colors">
+                          <div
+                            className="group flex flex-col gap-1.5 p-2.5 rounded-md bg-secondary/50 hover:bg-secondary transition-colors"
+                            onDoubleClick={() => { if (!isRendering) setEditingClipId(clip.id) }}
+                          >
                             <div className="flex items-center gap-2">
                               {clip.thumbnail ? (
                                 <img
@@ -398,7 +401,7 @@ export function Bucket({ type, label, color }: BucketProps) {
                                       <Button
                                         variant="ghost"
                                         size="icon"
-                                        className="h-6 w-6 opacity-0 group-hover:opacity-100"
+                                        className="h-6 w-6 opacity-60 group-hover:opacity-100 focus-visible:opacity-100"
                                         onClick={() => setEditingClipId(clip.id)}
                                         disabled={isRendering}
                                       >
