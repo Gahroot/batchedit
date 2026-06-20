@@ -62,7 +62,7 @@ export interface HookTextProgress {
 export interface ErrorLogEntry {
   id: string
   timestamp: number
-  source: 'caption' | 'render' | 'hooktext'
+  source: 'caption' | 'render' | 'hooktext' | 'ingest'
   clipName: string
   message: string
   /** Raw technical detail (e.g. FFmpeg stderr) kept for bug reports / Copy. */

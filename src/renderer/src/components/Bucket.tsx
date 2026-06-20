@@ -32,7 +32,7 @@ import { BlurText } from '@/components/ui/blur-text'
 import { toast } from 'sonner'
 import { getAgentModel } from '../agent-models'
 
-const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mkv', '.webm']
+const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.mts', '.m4v']
 
 function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
   const geminiApiKey = useStore((s) => s.geminiApiKey)
@@ -154,6 +154,7 @@ export function Bucket({ type, label, color }: BucketProps) {
   const mediaOverlays = useStore((s) => s.mediaOverlays)
   const setMediaOverlay = useStore((s) => s.setMediaOverlay)
   const autoTrimSilence = useStore((s) => s.autoTrimSilence)
+  const addError = useStore((s) => s.addError)
   const { loadProgress } = useWhisper()
   const [isDragOver, setIsDragOver] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
@@ -174,8 +175,13 @@ export function Bucket({ type, label, color }: BucketProps) {
       window.api.getMetadata(finalPath).catch(() => ({ duration: 0 })),
       window.api.getThumbnail(finalPath).catch(() => undefined)
     ])
+    if (!meta.duration || meta.duration <= 0) {
+      const message = `Couldn't read ${name} — file may be unsupported or corrupt`
+      addError({ source: 'ingest', clipName: name, message })
+      toast.error(message)
+    }
     return { id: uuidv4(), path: finalPath, name, duration: meta.duration, thumbnail }
-  }, [autoTrimSilence])
+  }, [autoTrimSilence, addError])
 
   const handleAddClips = useCallback(async () => {
     const filePaths = await window.api.openFiles()
@@ -219,9 +225,14 @@ export function Bucket({ type, label, color }: BucketProps) {
         e.preventDefault(); e.stopPropagation(); setIsDragOver(false)
         if (isRendering) return
         const files = Array.from(e.dataTransfer.files)
-        const videoPaths = files
-          .filter((f) => VIDEO_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext)))
-          .map((f) => window.api.getPathForFile(f))
+        const videoFiles = files.filter((f) =>
+          VIDEO_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext))
+        )
+        const skipped = files.length - videoFiles.length
+        if (skipped > 0) {
+          toast.warning(`${skipped} file${skipped === 1 ? '' : 's'} skipped (unsupported format)`)
+        }
+        const videoPaths = videoFiles.map((f) => window.api.getPathForFile(f))
         if (videoPaths.length === 0) return
         setIsProcessing(true)
         try {
