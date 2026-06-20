@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Play, Loader2, Captions, Crop, Scissors, Brain, Square } from 'lucide-react'
-import { useStore, RenderProgress } from '../store'
+import { useStore, RenderProgress, WHISPER_MODELS, getWhisperModelInfo } from '../store'
 import { useWhisper } from '@/hooks/useWhisper'
 import { WhisperStatus } from './WhisperStatus'
 import { ErrorLog } from './ErrorLog'
@@ -152,7 +152,12 @@ export function RenderPanel() {
           const msg = err instanceof Error ? err.message : String(err)
           console.error('Whisper model loading failed:', err)
           addError({ source: 'caption', clipName: 'Whisper Model', message: msg })
-          toast.error('Whisper model failed to load')
+          // Turn the switch OFF so the UI never claims captions are on while
+          // rendering proceeds caption-less. The user can re-enable and retry.
+          setAutoCaptions(false)
+          toast.error('Whisper model failed to load — Auto Captions turned off', {
+            description: 'Rendering without captions. Re-enable Auto Captions to try again.'
+          })
           setCaptionProgress(null)
         }
       }
@@ -426,6 +431,8 @@ export function RenderPanel() {
           loadProgress={loadProgress}
           isTranscribing={isTranscribing}
           currentClip={captionProgress?.currentClip}
+          modelLabel={getWhisperModelInfo(whisperModel)?.label}
+          modelSize={getWhisperModelInfo(whisperModel)?.approxSize}
         />
       )}
 
@@ -483,10 +490,11 @@ export function RenderPanel() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="onnx-community/whisper-tiny.en_timestamped">Tiny (fast)</SelectItem>
-                    <SelectItem value="onnx-community/whisper-base.en_timestamped">Base (balanced)</SelectItem>
-                    <SelectItem value="onnx-community/whisper-small.en_timestamped">Small (accurate)</SelectItem>
-                    <SelectItem value="onnx-community/whisper-large-v3-turbo_timestamped">Turbo (best, WebGPU)</SelectItem>
+                    {WHISPER_MODELS.map((m) => (
+                      <SelectItem key={m.id} value={m.id}>
+                        {m.label} · {m.approxSize}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>

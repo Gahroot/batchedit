@@ -154,6 +154,7 @@ export function Bucket({ type, label, color }: BucketProps) {
   const mediaOverlays = useStore((s) => s.mediaOverlays)
   const setMediaOverlay = useStore((s) => s.setMediaOverlay)
   const autoTrimSilence = useStore((s) => s.autoTrimSilence)
+  const { loadProgress } = useWhisper()
   const [isDragOver, setIsDragOver] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [editingClipId, setEditingClipId] = useState<string | null>(null)
@@ -316,7 +317,11 @@ export function Bucket({ type, label, color }: BucketProps) {
             {hookTextProgress.stage === 'transcribing' && `Transcribing ${hookTextProgress.currentClip}…`}
             {hookTextProgress.stage === 'generating' && `Generating text for ${hookTextProgress.currentClip}…`}
           </span>
-          <span className="font-mono">{hookTextProgress.completedClips}/{hookTextProgress.totalClips}</span>
+          <span className="font-mono">
+            {hookTextProgress.stage === 'loading-model'
+              ? `${loadProgress}%`
+              : `${hookTextProgress.completedClips}/${hookTextProgress.totalClips}`}
+          </span>
         </div>
       )}
 

@@ -9,6 +9,10 @@ interface WhisperStatusProps {
   loadProgress: number
   isTranscribing: boolean
   currentClip?: string
+  /** Short model label, e.g. "Turbo (best, WebGPU)" */
+  modelLabel?: string
+  /** Approximate one-time download size, e.g. "~1.6 GB" */
+  modelSize?: string
 }
 
 export function WhisperStatus({
@@ -16,7 +20,9 @@ export function WhisperStatus({
   isReady,
   loadProgress,
   isTranscribing,
-  currentClip
+  currentClip,
+  modelLabel,
+  modelSize
 }: WhisperStatusProps) {
   return (
     <AnimatePresence>
@@ -25,12 +31,20 @@ export function WhisperStatus({
           initial={{ opacity: 0, height: 0 }}
           animate={{ opacity: 1, height: 'auto' }}
           exit={{ opacity: 0, height: 0 }}
-          className="flex items-center gap-3 mb-2"
+          className="mb-2"
         >
-          <Loader2 className="w-4 h-4 animate-spin text-primary" />
-          <span className="text-xs text-muted-foreground">Downloading Whisper model...</span>
-          <Progress value={loadProgress} className="flex-1 h-2" />
-          <span className="text-xs font-mono text-muted-foreground">{loadProgress}%</span>
+          <div className="flex items-center gap-3">
+            <Loader2 className="w-4 h-4 animate-spin text-primary" />
+            <span className="text-xs text-muted-foreground">
+              Downloading Whisper model{modelLabel ? ` — ${modelLabel}` : ''}
+              {modelSize ? ` (${modelSize})` : ''}...
+            </span>
+            <Progress value={loadProgress} className="flex-1 h-2" />
+            <span className="text-xs font-mono text-muted-foreground">{loadProgress}%</span>
+          </div>
+          <p className="text-[10px] text-muted-foreground mt-1">
+            First run downloads this model once, then it's cached for future renders.
+          </p>
         </motion.div>
       )}
       {isReady && !isTranscribing && !isLoading && (
@@ -40,7 +54,7 @@ export function WhisperStatus({
           exit={{ opacity: 0 }}
         >
           <Badge variant="outline" className="text-green-500 border-green-500/30">
-            Whisper Ready
+            Whisper Ready{modelLabel ? ` — ${modelLabel}` : ''}
           </Badge>
         </motion.div>
       )}
