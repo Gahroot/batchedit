@@ -43,6 +43,7 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { Stepper } from '@/components/ui/stepper'
+import { Switch } from '@/components/ui/switch'
 
 type Step = 'upload' | 'transcribing' | 'review' | 'splitting' | 'qa' | 'done'
 
@@ -262,6 +263,10 @@ export function ClipSplitter() {
   const [approvedClips, setApprovedClips] = useState<Set<string>>(new Set())
   const [qaBusy, setQaBusy] = useState(false)
   const [splitAction, setSplitAction] = useState<'save' | 'push' | null>(null)
+  // On the save path, also add the resulting clips to their buckets (default on so it "just works").
+  const [alsoAddToBuckets, setAlsoAddToBuckets] = useState(true)
+  // Reflects whether clips were actually added to buckets, shown on the done screen.
+  const [addedToBuckets, setAddedToBuckets] = useState(false)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const dropRef = useRef<HTMLDivElement>(null)
@@ -287,6 +292,8 @@ export function ClipSplitter() {
       setApprovedClips(new Set())
       setQaBusy(false)
       setSplitAction(null)
+      setAlsoAddToBuckets(true)
+      setAddedToBuckets(false)
     }
   }, [open])
 
@@ -499,11 +506,12 @@ export function ClipSplitter() {
     })
   }, [])
 
-  const handleFinalPush = useCallback(async () => {
+  // Adds the approved QA clips into their Hook/Meat/CTA buckets. Returns how many were added.
+  const addApprovedClipsToBuckets = useCallback(async (): Promise<number> => {
     const approved = qaResults.filter(
       (r) => r.status === 'clean' || r.status === 'auto_fixed' || approvedClips.has(r.originalPath)
     )
-    if (approved.length === 0) return
+    if (approved.length === 0) return 0
 
     const bucketClips: Record<BucketType, Clip[]> = {
       hook: [],
@@ -533,8 +541,24 @@ export function ClipSplitter() {
       }
     }
 
-    setStep('done')
+    return approved.length
   }, [qaResults, approvedClips, addClips])
+
+  const handleFinalPush = useCallback(async () => {
+    const added = await addApprovedClipsToBuckets()
+    setAddedToBuckets(added > 0)
+    setStep('done')
+  }, [addApprovedClipsToBuckets])
+
+  const handleFinalSave = useCallback(async () => {
+    if (alsoAddToBuckets) {
+      const added = await addApprovedClipsToBuckets()
+      setAddedToBuckets(added > 0)
+    } else {
+      setAddedToBuckets(false)
+    }
+    setStep('done')
+  }, [alsoAddToBuckets, addApprovedClipsToBuckets])
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -951,7 +975,16 @@ export function ClipSplitter() {
                   </div>
                 </ScrollArea>
 
-                <div className="flex items-center justify-end gap-2 pt-1">
+                <div className="flex items-center justify-end gap-3 pt-1">
+                  {splitAction === 'save' && (
+                    <label className="mr-auto flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+                      <Switch
+                        checked={alsoAddToBuckets}
+                        onCheckedChange={setAlsoAddToBuckets}
+                      />
+                      Also add to buckets
+                    </label>
+                  )}
                   {splitAction === 'push' && (
                     <Button
                       onClick={handleFinalPush}
@@ -967,7 +1000,7 @@ export function ClipSplitter() {
                     </Button>
                   )}
                   {splitAction === 'save' && (
-                    <Button onClick={() => setStep('done')} className="gap-1.5">
+                    <Button onClick={handleFinalSave} className="gap-1.5">
                       <CheckCircle className="w-4 h-4" />
                       Done
                     </Button>
@@ -990,6 +1023,15 @@ export function ClipSplitter() {
                 {splitAction === 'save'
                   ? `Saved ${splitResults.length} clips to disk`
                   : `Pushed ${qaResults.filter((r) => r.status === 'clean' || r.status === 'auto_fixed' || approvedClips.has(r.originalPath)).length} clips to buckets`}
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">
+                {addedToBuckets
+                  ? splitAction === 'save'
+                    ? 'Also added to your Hook/Meat/CTA buckets — ready to use without re-importing.'
+                    : 'Added to your Hook/Meat/CTA buckets — ready to use without re-importing.'
+                  : splitAction === 'save'
+                    ? 'Files written to disk only — not added to buckets. Import them to use in the app.'
+                    : 'No clips were added to buckets.'}
               </p>
               <div className="mt-3 space-y-1">
                 {qaResults.map((r, i) => (
