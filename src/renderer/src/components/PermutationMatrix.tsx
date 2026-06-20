@@ -13,15 +13,20 @@ type CellStatus = 'idle' | 'queued' | 'rendering' | 'done' | 'error'
 interface CellInfo {
   combo: Combo
   status: CellStatus
+  phase?: RenderProgress['status'] | undefined
   percent: number
-  error?: string
+  error?: string | undefined
 }
 
-function statusOf(rp: RenderProgress | undefined): CellStatus {
+// Any phase where FFmpeg is actively working on a job. Keep in sync with
+// RenderProgressStatus in store.ts (mirrors render-pipeline.ts emitted statuses).
+const ACTIVE_STATUSES = new Set(['rendering', 'normalizing', 'concatenating', 'overlaying'])
+
+export function statusOf(rp: RenderProgress | undefined): CellStatus {
   if (!rp) return 'idle'
   if (rp.status === 'done') return 'done'
   if (rp.status === 'error') return 'error'
-  if (rp.status === 'rendering' || rp.status === 'normalizing') return 'rendering'
+  if (ACTIVE_STATUSES.has(rp.status)) return 'rendering'
   return 'queued'
 }
 
@@ -49,6 +54,7 @@ export function PermutationMatrix() {
       return {
         combo,
         status: statusOf(rp),
+        phase: rp?.status,
         percent: rp?.percent ?? 0,
         error: rp?.error
       }
@@ -92,7 +98,7 @@ export function PermutationMatrix() {
                   )}
                 />
                 <span className="font-mono font-semibold uppercase tracking-wide">
-                  {cell.status === 'idle' ? 'queued' : cell.status}
+                  {cell.status === 'rendering' && cell.phase ? cell.phase : cell.status === 'idle' ? 'queued' : cell.status}
                   {cell.status === 'rendering' && ` · ${Math.round(cell.percent)}%`}
                 </span>
               </div>
