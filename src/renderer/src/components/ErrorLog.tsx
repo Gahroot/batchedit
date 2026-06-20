@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, ChevronRight, Copy, Trash2 } from 'lucide-react'
 import { useStore, ErrorLogEntry } from '../store'
@@ -21,6 +21,17 @@ export function ErrorLog() {
   const errorLog = useStore((s) => s.errorLog)
   const clearErrors = useStore((s) => s.clearErrors)
   const [expanded, setExpanded] = useState(false)
+  const prevCount = useRef(errorLog.length)
+
+  // Auto-expand when the log goes from empty to non-empty (e.g. a render or
+  // transcription just failed) so failures are not hidden behind a small badge.
+  // Stays manually collapsible afterward.
+  useEffect(() => {
+    if (prevCount.current === 0 && errorLog.length > 0) {
+      setExpanded(true)
+    }
+    prevCount.current = errorLog.length
+  }, [errorLog.length])
 
   if (errorLog.length === 0) return null
 

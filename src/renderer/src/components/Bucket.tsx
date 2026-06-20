@@ -84,6 +84,7 @@ function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
 
           if (!transcript) {
             addError({ source: 'hooktext', clipName: clip.name, message: 'Empty transcript — skipping' })
+            toast.error(`${clip.name}: empty transcript — skipping`)
             continue
           }
 
@@ -93,11 +94,15 @@ function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
           setHookText(clip.id, hookText)
         } catch (err) {
           if (wavPath) await window.api.releaseTempFile(wavPath)
-          addError({ source: 'hooktext', clipName: clip.name, message: err instanceof Error ? err.message : String(err) })
+          const message = err instanceof Error ? err.message : String(err)
+          addError({ source: 'hooktext', clipName: clip.name, message })
+          toast.error(`Hook text failed for ${clip.name}`, { description: message })
         }
       }
     } catch (err) {
-      addError({ source: 'hooktext', clipName: 'Whisper', message: err instanceof Error ? err.message : String(err) })
+      const message = err instanceof Error ? err.message : String(err)
+      addError({ source: 'hooktext', clipName: 'Whisper', message })
+      toast.error('Hook text generation failed', { description: message })
     } finally {
       setHookTextProgress(null)
       setIsGenerating(false)
@@ -179,6 +184,10 @@ export function Bucket({ type, label, color }: BucketProps) {
     try {
       const newClips = await Promise.all(filePaths.map(processClip))
       addClips(type, newClips)
+    } catch (err) {
+      toast.error('Failed to add clips', {
+        description: err instanceof Error ? err.message : String(err)
+      })
     } finally {
       setIsProcessing(false)
     }
@@ -217,6 +226,10 @@ export function Bucket({ type, label, color }: BucketProps) {
         try {
           const newClips = await Promise.all(videoPaths.map(processClip))
           addClips(type, newClips)
+        } catch (err) {
+          toast.error('Failed to add clips', {
+            description: err instanceof Error ? err.message : String(err)
+          })
         } finally {
           setIsProcessing(false)
         }
