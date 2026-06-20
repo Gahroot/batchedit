@@ -1,7 +1,14 @@
 import { AlertCircle, Bot, CheckCircle2, Clock, Copy, Loader2, Play, Square } from 'lucide-react'
 import { useState } from 'react'
+import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger
+} from '@/components/ui/tooltip'
 import { getAgentModel } from '../agent-models'
 import { QaPanel } from './QaPanel'
 import { useStore } from '../store'
@@ -114,7 +121,18 @@ export function AgentPanel() {
   const xiaomiApiKey = useStore((state) => state.xiaomiApiKey)
   const agentModelId = useStore((state) => state.agentModelId)
 
+  const selectedModel = getAgentModel(agentModelId)
+  const resolvedApiKey = selectedModel.keyKind === 'xiaomi' ? xiaomiApiKey : geminiApiKey
+  const keyLabel = selectedModel.keyKind === 'xiaomi' ? 'Xiaomi' : 'Gemini'
+  const hasApiKey = resolvedApiKey.trim().length > 0
+
   const chooseAndRun = async (): Promise<void> => {
+    if (!hasApiKey) {
+      const message = `Add your ${keyLabel} API key in the top bar to run the agent.`
+      toast.error(message)
+      appendAgentEvent({ type: 'error', error: message })
+      return
+    }
     try {
       const paths = await window.api.openFiles()
       const path = paths[0]
@@ -162,10 +180,26 @@ export function AgentPanel() {
           Agent
         </div>
         <div className="flex gap-2">
-          <Button size="sm" onClick={chooseAndRun} disabled={agentRunning} className="flex-1">
-            {agentRunning ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
-            Run Agent
-          </Button>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="flex-1">
+                  <Button
+                    size="sm"
+                    onClick={chooseAndRun}
+                    disabled={agentRunning || !hasApiKey}
+                    className="w-full"
+                  >
+                    {agentRunning ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
+                    Run Agent
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              {!hasApiKey ? (
+                <TooltipContent>Add your {keyLabel} API key in the top bar to run the agent</TooltipContent>
+              ) : null}
+            </Tooltip>
+          </TooltipProvider>
           <Button size="sm" variant="outline" onClick={cancel} disabled={!agentRunning || !runId}>
             <Square className="h-4 w-4" />
           </Button>

@@ -29,11 +29,14 @@ import {
   ContextMenuSeparator
 } from '@/components/ui/context-menu'
 import { BlurText } from '@/components/ui/blur-text'
+import { toast } from 'sonner'
+import { getAgentModel } from '../agent-models'
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mkv', '.webm']
 
 function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
   const geminiApiKey = useStore((s) => s.geminiApiKey)
+  const agentModelId = useStore((s) => s.agentModelId)
   const hookTexts = useStore((s) => s.hookTexts)
   const setHookText = useStore((s) => s.setHookText)
   const setHookTextProgress = useStore((s) => s.setHookTextProgress)
@@ -45,7 +48,12 @@ function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
 
   const handleGenerate = async () => {
     if (!geminiApiKey) {
-      addError({ source: 'hooktext', clipName: 'Setup', message: 'Gemini API key not set. Add it in the settings bar.' })
+      const usesXiaomi = getAgentModel(agentModelId).keyKind === 'xiaomi'
+      const message = usesXiaomi
+        ? 'Hook text needs a Gemini API key (not Xiaomi). Switch the model to Gemini and add your Gemini API key in the top settings bar.'
+        : 'Add your Gemini API key in the top settings bar to generate hook text.'
+      toast.error(message)
+      addError({ source: 'hooktext', clipName: 'Setup', message })
       return
     }
 
