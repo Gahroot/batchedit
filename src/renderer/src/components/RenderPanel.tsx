@@ -278,7 +278,25 @@ export function RenderPanel() {
       if (totalJobs > 0 && canceledCount > 0) {
         toast.info(`Canceled ${canceledCount} render${canceledCount === 1 ? '' : 's'}`)
       } else if (totalJobs > 0 && errorCount === 0) {
-        toast.success(`${doneCount} video${doneCount === 1 ? '' : 's'} rendered`)
+        const firstDoneJob = finalProgress.find((r) => r.status === 'done')
+        const firstFilePath = firstDoneJob
+          ? jobs.find((j) => j.id === firstDoneJob.jobId)?.outputPath
+          : undefined
+        const revealTarget = firstFilePath ?? settings.outputDirectory
+        toast.success(`${doneCount} video${doneCount === 1 ? '' : 's'} rendered`, {
+          action: revealTarget
+            ? {
+                label: 'Open Folder',
+                onClick: () => {
+                  if (firstFilePath) {
+                    window.api.showItemInFolder(firstFilePath)
+                  } else if (settings.outputDirectory) {
+                    window.api.openPath(settings.outputDirectory)
+                  }
+                }
+              }
+            : undefined
+        })
         confetti({
           particleCount: 120,
           spread: 70,

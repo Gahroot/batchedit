@@ -4,6 +4,13 @@ type Platform = 'tiktok' | 'reels' | 'shorts' | 'universal'
 type BucketType = 'hook' | 'meat' | 'cta'
 type QaStatus = 'clean' | 'auto_fixed' | 'flagged'
 
+interface BoundaryQaReport {
+  clips: ClipQaResult[]
+  cleanCount: number
+  autoFixedCount: number
+  flaggedCount: number
+}
+
 interface QaLeak {
   marker: string
   matchedTokens: string[]
@@ -157,6 +164,8 @@ interface Api {
   openFiles: () => Promise<string[]>
   openImages: () => Promise<string[]>
   openDirectory: () => Promise<string | null>
+  showItemInFolder: (fullPath: string) => Promise<void>
+  openPath: (fullPath: string) => Promise<string>
   getMetadata: (filePath: string) => Promise<VideoMetadata>
   extractAudio: (videoPath: string) => Promise<string>
   generateAss: (
@@ -205,9 +214,36 @@ interface Api {
     qaRecut: (params: QaRecutParams) => Promise<ClipQaResult>
     onEvent: (cb: (evt: AgentUiEvent) => void) => () => void
   }
+  qa: {
+    runBoundaryQA: (params: {
+      sourcePath: string
+      clips: Array<{
+        label: string
+        bucket: BucketType
+        path: string
+        sourceStart: number
+        sourceEnd: number
+        duration: number
+      }>
+      windowMs?: number
+    }) => Promise<BoundaryQaReport>
+    recutClip: (params: {
+      clipPath: string
+      sourcePath: string
+      sourceStart: number
+      sourceEnd: number
+      bucket: BucketType
+      label: string
+      startDeltaMs: number
+      endDeltaMs: number
+      model?: string
+    }) => Promise<ClipQaResult>
+  }
   agentBridge: {
     onTranscribeRequest: (cb: (req: { id: string; payload: { path: string; model?: string } }) => void) => () => void
-    replyTranscribe: (id: string, result: { words: Array<{ text: string; start: number; end: number }>; full?: string } | { error: string }) => void
+    onTranscribeCancel: (cb: (req: { id: string }) => void) => () => void
+    replyTranscribe: (id: string, result: { words: Array<{ text: string; start: number; end: number }>; full?: string; speechIntervals?: Array<{ start: number; end: number }> }) => void
+    replyTranscribeError: (id: string, error: string) => void
     onStoreSnapshotRequest: (cb: (req: { id: string; payload: unknown }) => void) => () => void
     replyStoreSnapshot: (id: string, result: unknown) => void
     onApplyAction: (cb: (action: { runId?: string; type: string; payload: unknown }) => void) => () => void

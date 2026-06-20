@@ -3,6 +3,7 @@ import type { BrowserWindow } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import { ProviderError, providerRegistry, type Provider } from '@prestyj/ai'
 import { manualRecutClip, type ManualRecutParams } from './boundary-qa'
+import { isWindowAlive } from './window-guard'
 import { createGoogleProviderEntry, GEMINI_FLASH_MODEL, GOOGLE_PROVIDER } from './google-provider'
 import { JobLedger } from './job-ledger'
 import type { ClipQaResult } from '../../shared/types'
@@ -151,7 +152,7 @@ export class AgentService {
     if (this.currentRun?.runId !== runId) return
     this.currentRun.controller.abort()
     this.currentRun = null
-    this.win.webContents.send('agent:event', { runId, type: 'agent_canceled' })
+    if (isWindowAlive(this.win)) this.win.webContents.send('agent:event', { runId, type: 'agent_canceled' })
   }
 
   private async runAgent(runId: string, agent: Agent, sourcePath: string): Promise<void> {
@@ -197,6 +198,7 @@ export class AgentService {
   }
 
   private sendEvent(runId: string, event: AgentServiceEvent): void {
+    if (!isWindowAlive(this.win)) return
     const safeEvent = event.type === 'error'
       ? { ...event, error: event.error.message, diagnostics: diagnosticsFromError(event.error) }
       : event

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { v4 as uuidv4 } from 'uuid'
 import { callRenderer } from '../renderer-rpc'
+import { isWindowAlive } from '../window-guard'
 import { cancelActiveRenderBatch } from '../../render-pipeline'
 import type { BatchEditAgentTool, ToolContextState } from './types'
 import { stringifyToolResult } from './types'
@@ -45,7 +46,7 @@ export function createRenderTools(ctx: ToolContextState): BatchEditAgentTool[] {
       async execute(args, toolContext) {
         if (!ctx.approvedRenderAtTurn) throw new Error('Render approval is required immediately before startRenderJob')
         const jobId = uuidv4()
-        if (!args.dryRun) {
+        if (!args.dryRun && isWindowAlive(ctx.win)) {
           ctx.win.webContents.send('agent:startRender', { jobId })
         }
         ctx.jobLedger.register(jobId)

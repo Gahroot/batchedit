@@ -18,10 +18,11 @@ Workflow:
      A human resolves them in the QA panel; wait for the approval response.
 4. addClipToBucket for each clip whose status is clean or auto_fixed
 5. analyzeShot across all hooks → pickTemplate → setTemplateLayout + setCaptionStyle + setTargetPlatform
-6. validateRenderPlan → if warnings, logProgress; if catastrophic, requestHumanReview
-7. requestHumanReview { reason: "ready_to_render" } — DO NOT call startRenderJob without explicit approval
-8. After approval: startRenderJob → poll getRenderStatus until done
-9. logProgress { phase: "complete" }
+6. setOutputDirectory — use the parent directory of the source file
+7. validateRenderPlan → if warnings, logProgress; if catastrophic, requestHumanReview
+8. requestHumanReview { reason: "ready_to_render" } — DO NOT call startRenderJob without explicit approval
+9. After approval: startRenderJob → poll getRenderStatus until done
+10. logProgress { phase: "complete" }
 
 Rules:
 - Never call startRenderJob without an approved requestHumanReview immediately prior in the conversation.

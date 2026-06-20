@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import { v4 as uuidv4 } from 'uuid'
 import { callRenderer } from '../renderer-rpc'
+import { isWindowAlive } from '../window-guard'
+import { readTranscriptCache } from '../transcript-cache'
 import type { BatchEditAgentTool, ToolContextState } from './types'
 import { stringifyToolResult } from './types'
 
@@ -23,9 +25,11 @@ const setTemplateLayoutSchema = z.object({
   media: z.object({ x: z.number(), y: z.number() })
 })
 const setTargetPlatformSchema = z.object({ platform: z.enum(['tiktok', 'reels', 'shorts', 'universal']) })
+const setOutputDirectorySchema = z.object({ directory: z.string().min(1) })
 const emptySchema = z.object({})
 
 function sendStoreAction(ctx: ToolContextState, type: string, payload: unknown): void {
+  if (!isWindowAlive(ctx.win)) return
   console.info('agent_store_action', { runId: ctx.runId, type })
   ctx.win.webContents.send('agent:applyAction', { runId: ctx.runId, type, payload })
 }
@@ -37,9 +41,12 @@ export function createStoreActionTools(ctx: ToolContextState): BatchEditAgentToo
       description: 'Add a clip to a renderer bucket.',
       parameters: addClipToBucketSchema,
       executionMode: 'sequential',
-      execute(args) {
+      async execute(args) {
         const id = uuidv4()
-        sendStoreAction(ctx, 'addClipToBucket', { ...args, clip: { ...args.clip, id } })
+        let clip = { ...args.clip, id }
+        const cached = await readTranscriptCache(args.clip.path)
+        if (cached?.words) clip = { ...clip, transcript: cached.words }
+        sendStoreAction(ctx, 'addClipToBucket', { ...args, clip })
         return stringifyToolResult({ id })
       }
     },
@@ -100,6 +107,16 @@ export function createStoreActionTools(ctx: ToolContextState): BatchEditAgentToo
       executionMode: 'sequential',
       execute(args) {
         sendStoreAction(ctx, 'setTargetPlatform', args)
+        return stringifyToolResult({ ok: true })
+      }
+    },
+    {
+      name: 'setOutputDirectory',
+      description: 'Set the render output directory.',
+      parameters: setOutputDirectorySchema,
+      executionMode: 'sequential',
+      execute(args) {
+        sendStoreAction(ctx, 'setOutputDirectory', { directory: args.directory })
         return stringifyToolResult({ ok: true })
       }
     },

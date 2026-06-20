@@ -118,6 +118,12 @@ function readTargetPlatform(payload: unknown): SetTargetPlatformPayload | null {
   return { platform }
 }
 
+function readSetOutputDirectoryPayload(payload: unknown): string | null {
+  if (!isRecord(payload)) return null
+  if (typeof payload.directory !== 'string' || !payload.directory) return null
+  return payload.directory
+}
+
 function applyAgentAction(action: AgentAction): void {
   const state = useStore.getState()
 
@@ -159,6 +165,11 @@ function applyAgentAction(action: AgentAction): void {
     case 'setTargetPlatform': {
       const payload = readTargetPlatform(action.payload)
       if (payload) state.setTargetPlatform(payload.platform)
+      return
+    }
+    case 'setOutputDirectory': {
+      const dir = readSetOutputDirectoryPayload(action.payload)
+      if (dir) state.setOutputDirectory(dir)
       return
     }
   }

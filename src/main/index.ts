@@ -6,6 +6,7 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupFFmpeg } from './ffmpeg'
 import { setupRenderPipeline, clearNormalizedCache, clearTrackedTempFiles } from './render-pipeline'
 import { setupAgent } from './agent/ipc'
+import { setupQaIpc } from './qa-ipc'
 import {
   PLATFORM_SAFE_ZONES,
   getSafeZone,
@@ -78,6 +79,7 @@ function createWindow(): void {
   })
 
   setupAgent(mainWindow)
+  setupQaIpc(mainWindow)
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
@@ -127,6 +129,18 @@ app.whenReady().then(() => {
       properties: ['openDirectory', 'createDirectory']
     })
     return result.filePaths[0] || null
+  })
+
+  // IPC: Reveal a file in the OS file browser (highlighting it)
+  ipcMain.handle('shell:showItemInFolder', async (_event, fullPath: string): Promise<void> => {
+    if (typeof fullPath !== 'string' || fullPath.length === 0) return
+    shell.showItemInFolder(fullPath)
+  })
+
+  // IPC: Open a file or directory with the OS default handler
+  ipcMain.handle('shell:openPath', async (_event, fullPath: string): Promise<string> => {
+    if (typeof fullPath !== 'string' || fullPath.length === 0) return 'Invalid path'
+    return shell.openPath(fullPath)
   })
 
   // IPC: Generate hook text via Gemini AI

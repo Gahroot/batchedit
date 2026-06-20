@@ -7,6 +7,10 @@ const api = {
   openImages: () => ipcRenderer.invoke('dialog:openImages'),
   openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
 
+  // Shell
+  showItemInFolder: (fullPath: string) => ipcRenderer.invoke('shell:showItemInFolder', fullPath),
+  openPath: (fullPath: string) => ipcRenderer.invoke('shell:openPath', fullPath),
+
   // FFmpeg
   getMetadata: (filePath: string) => ipcRenderer.invoke('ffmpeg:getMetadata', filePath),
   extractAudio: (videoPath: string) => ipcRenderer.invoke('ffmpeg:extractAudio', videoPath),
@@ -89,13 +93,45 @@ const api = {
     }
   },
 
+  qa: {
+    runBoundaryQA: (params: {
+      sourcePath: string
+      clips: Array<{
+        label: string
+        bucket: string
+        path: string
+        sourceStart: number
+        sourceEnd: number
+        duration: number
+      }>
+      windowMs?: number
+    }) => ipcRenderer.invoke('qa:runBoundaryQA', params),
+    recutClip: (params: {
+      clipPath: string
+      sourcePath: string
+      sourceStart: number
+      sourceEnd: number
+      bucket: string
+      label: string
+      startDeltaMs: number
+      endDeltaMs: number
+      model?: string
+    }) => ipcRenderer.invoke('qa:recutClip', params)
+  },
+
   agentBridge: {
     onTranscribeRequest: (callback: (req: { id: string; payload: { path: string; model?: string } }) => void) => {
       const handler = (_event: any, req: { id: string; payload: { path: string; model?: string } }) => callback(req)
       ipcRenderer.on('agent:transcribe', handler)
       return () => ipcRenderer.removeListener('agent:transcribe', handler)
     },
+    onTranscribeCancel: (callback: (req: { id: string }) => void) => {
+      const handler = (_event: any, req: { id: string }) => callback(req)
+      ipcRenderer.on('agent:transcribe:cancel', handler)
+      return () => ipcRenderer.removeListener('agent:transcribe:cancel', handler)
+    },
     replyTranscribe: (id: string, result: unknown) => ipcRenderer.send('agent:renderer-rpc:reply', { id, result }),
+    replyTranscribeError: (id: string, error: string) => ipcRenderer.send('agent:renderer-rpc:reply', { id, error }),
     replyStoreSnapshot: (id: string, result: unknown) => ipcRenderer.send('agent:renderer-rpc:reply', { id, result }),
     onStoreSnapshotRequest: (callback: (req: { id: string; payload: unknown }) => void) => {
       const handler = (_event: any, req: { id: string; payload: unknown }) => callback(req)

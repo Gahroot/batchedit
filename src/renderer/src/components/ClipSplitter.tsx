@@ -10,12 +10,18 @@ import {
   CheckCircle,
   Bug,
   MapPin,
-  X
+  X,
+  ShieldCheck,
+  AlertTriangle,
+  Wrench,
+  Check,
+  ChevronsRightLeft,
+  ChevronsLeftRight
 } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import { useWhisper, WhisperChunk } from '@/hooks/useWhisper'
 import { detectMarkers, DetectedMarker } from '../../../shared/marker-detection'
-import { useStore, BucketType, Clip, WordChunk } from '../store'
+import { useStore, BucketType, Clip, ClipQaResult, WordChunk } from '../store'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -38,15 +44,16 @@ import {
 } from '@/components/ui/select'
 import { Stepper } from '@/components/ui/stepper'
 
-type Step = 'upload' | 'transcribing' | 'review' | 'splitting' | 'done'
+type Step = 'upload' | 'transcribing' | 'review' | 'splitting' | 'qa' | 'done'
 
-const STEP_LABELS = ['Upload', 'Transcribe', 'Review', 'Split', 'Done']
+const STEP_LABELS = ['Upload', 'Transcribe', 'Review', 'Split', 'QA', 'Done']
 const STEP_INDEX: Record<Step, number> = {
   upload: 0,
   transcribing: 1,
   review: 2,
   splitting: 3,
-  done: 4
+  qa: 4,
+  done: 5
 }
 
 const BUCKET_COLORS: Record<BucketType, string> = {
@@ -65,6 +72,115 @@ const BUCKET_COLORS_BG_LIGHT: Record<BucketType, string> = {
   hook: 'bg-blue-500/20',
   meat: 'bg-green-500/20',
   cta: 'bg-orange-500/20'
+}
+
+const NUDGE_MS = 100
+
+function qaStatusMeta(status: ClipQaResult['status']): {
+  label: string
+  className: string
+  Icon: typeof ShieldCheck
+} {
+  if (status === 'clean') {
+    return { label: 'Clean', className: 'text-emerald-600', Icon: ShieldCheck }
+  }
+  if (status === 'auto_fixed') {
+    return { label: 'Auto-fixed', className: 'text-amber-600', Icon: Wrench }
+  }
+  return { label: 'Needs review', className: 'text-destructive', Icon: AlertTriangle }
+}
+
+function qaLeakSummary(clip: ClipQaResult): string | null {
+  const parts: string[] = []
+  if (clip.leadingLeak) parts.push(`start: heard "${clip.leadingLeak.marker}"`)
+  if (clip.trailingLeak) parts.push(`end: heard "${clip.trailingLeak.marker}"`)
+  return parts.length > 0 ? parts.join(' · ') : null
+}
+
+function QaRowInline({
+  clip,
+  approved,
+  onNudge,
+  onApprove
+}: {
+  clip: ClipQaResult
+  approved: boolean
+  onNudge: (clip: ClipQaResult, startDeltaMs: number, endDeltaMs: number) => Promise<void>
+  onApprove: (clip: ClipQaResult) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const { label, className, Icon } = qaStatusMeta(clip.status)
+  const leak = qaLeakSummary(clip)
+  const flagged = clip.status === 'flagged' && !approved
+
+  const handleNudge = async (startDeltaMs: number, endDeltaMs: number): Promise<void> => {
+    setBusy(true)
+    setError(null)
+    try {
+      await onNudge(clip, startDeltaMs, endDeltaMs)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="rounded-md border bg-background p-2 text-xs">
+      <div className="flex items-center gap-2">
+        <Icon className={`h-3.5 w-3.5 shrink-0 ${className}`} />
+        <span className="min-w-0 flex-1 truncate font-medium">{clip.label}</span>
+        <Badge variant={flagged ? 'destructive' : 'secondary'} className="shrink-0 text-[10px]">
+          {approved ? 'Approved' : label}
+        </Badge>
+      </div>
+      {leak ? <p className="mt-1 break-words text-[11px] text-muted-foreground">{leak}</p> : null}
+      {clip.recutCount > 0 ? (
+        <p className="mt-1 text-[10px] text-muted-foreground">
+          recut ×{clip.recutCount} · {Math.round(clip.confidence * 100)}% confidence
+        </p>
+      ) : null}
+      {error ? <p className="mt-1 text-[10px] text-destructive">{error}</p> : null}
+      {flagged ? (
+        <div className="mt-2 flex flex-wrap gap-1">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[10px]"
+            disabled={busy}
+            onClick={() => handleNudge(NUDGE_MS, 0)}
+            title="Trim 100ms off the start"
+          >
+            <ChevronsRightLeft className="mr-1 h-3 w-3" />
+            Start +100
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[10px]"
+            disabled={busy}
+            onClick={() => handleNudge(0, -NUDGE_MS)}
+            title="Trim 100ms off the end"
+          >
+            <ChevronsLeftRight className="mr-1 h-3 w-3" />
+            End −100
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 px-2 text-[10px]"
+            disabled={busy}
+            onClick={() => onApprove(clip)}
+            title="Accept this clip as-is"
+          >
+            {busy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Check className="mr-1 h-3 w-3" />}
+            Approve
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 function formatTime(seconds: number): string {
@@ -142,6 +258,10 @@ export function ClipSplitter() {
   const [splitProgress, setSplitProgress] = useState(0)
   const [showRawChunks, setShowRawChunks] = useState(false)
   const [markInTime, setMarkInTime] = useState<number | null>(null)
+  const [qaResults, setQaResults] = useState<ClipQaResult[]>([])
+  const [approvedClips, setApprovedClips] = useState<Set<string>>(new Set())
+  const [qaBusy, setQaBusy] = useState(false)
+  const [splitAction, setSplitAction] = useState<'save' | 'push' | null>(null)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const dropRef = useRef<HTMLDivElement>(null)
@@ -163,6 +283,10 @@ export function ClipSplitter() {
       setSplitProgress(0)
       setShowRawChunks(false)
       setMarkInTime(null)
+      setQaResults([])
+      setApprovedClips(new Set())
+      setQaBusy(false)
+      setSplitAction(null)
     }
   }, [open])
 
@@ -280,48 +404,19 @@ export function ClipSplitter() {
     [wordChunks]
   )
 
-  const handleSaveToDisk = useCallback(async () => {
+  const handleSplit = useCallback(async (action: 'save' | 'push') => {
     if (!videoPath || markers.length === 0) return
-    const dir = await window.api.openDirectory()
-    if (!dir) return
 
-    setStep('splitting')
-    setSplitProgress(0)
-
-    try {
-      const segments = markers.map((m) => ({
-        label: m.label,
-        bucket: m.bucket,
-        startTime: m.startTime,
-        endTime: m.endTime
-      }))
-      const results = await window.api.splitVideo(videoPath, segments, dir)
-
-      // Trim leading silence from each split clip
-      const trimmedResults = await Promise.all(
-        results.map(async (r) => {
-          try {
-            const trimResult = await window.api.trimLeadingSilence(r.outputPath)
-            return { ...r, outputPath: trimResult.outputPath }
-          } catch {
-            return r
-          }
-        })
-      )
-
-      setSplitResults(trimmedResults)
-      setStep('done')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      setStep('review')
+    let outputDir: string | null = null
+    if (action === 'save') {
+      outputDir = await window.api.openDirectory()
+      if (!outputDir) return
     }
-  }, [videoPath, markers])
 
-  const handlePushToBuckets = useCallback(async () => {
-    if (!videoPath || markers.length === 0) return
-
+    setSplitAction(action)
     setStep('splitting')
     setSplitProgress(0)
+    setError(null)
 
     try {
       const segments = markers.map((m) => ({
@@ -330,7 +425,7 @@ export function ClipSplitter() {
         startTime: m.startTime,
         endTime: m.endTime
       }))
-      const rawResults = await window.api.splitVideo(videoPath, segments, null)
+      const rawResults = await window.api.splitVideo(videoPath, segments, outputDir)
 
       // Trim leading silence from each split clip
       const results = await Promise.all(
@@ -345,46 +440,101 @@ export function ClipSplitter() {
       )
       setSplitResults(results)
 
-      // Add clips to buckets with transcript data
-      const bucketClips: Record<BucketType, Clip[]> = {
-        hook: [],
-        meat: [],
-        cta: []
-      }
+      // Transition to QA step
+      setStep('qa')
+      setQaBusy(true)
 
-      for (let i = 0; i < results.length; i++) {
-        const result = results[i]
-        const marker = markers[i]
-        const meta = await window.api.getMetadata(result.outputPath)
-        let thumbnail: string | undefined
-        try {
-          thumbnail = await window.api.getThumbnail(result.outputPath)
-        } catch {}
-
-        const transcript = marker ? getTranscriptForMarker(marker) : undefined
-
-        bucketClips[result.bucket as BucketType].push({
-          id: uuidv4(),
-          path: result.outputPath,
-          name: `${result.label}.mp4`,
-          duration: meta.duration,
-          thumbnail,
-          transcript
+      const clipInputs = await Promise.all(
+        results.map(async (r, i) => {
+          const meta = await window.api.getMetadata(r.outputPath)
+          return {
+            label: r.label,
+            bucket: r.bucket as BucketType,
+            path: r.outputPath,
+            sourceStart: markers[i].startTime,
+            sourceEnd: markers[i].endTime,
+            duration: meta.duration
+          }
         })
-      }
+      )
 
-      for (const [bucket, clips] of Object.entries(bucketClips)) {
-        if (clips.length > 0) {
-          addClips(bucket as BucketType, clips)
-        }
-      }
-
-      setStep('done')
+      const report = await window.api.qa.runBoundaryQA({
+        sourcePath: videoPath,
+        clips: clipInputs
+      })
+      setQaResults(report.clips)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setStep('review')
+    } finally {
+      setQaBusy(false)
     }
-  }, [videoPath, markers, addClips, getTranscriptForMarker])
+  }, [videoPath, markers])
+
+  const handleNudge = useCallback(async (clip: ClipQaResult, startDeltaMs: number, endDeltaMs: number) => {
+    const updated = await window.api.qa.recutClip({
+      clipPath: clip.path,
+      sourcePath: clip.sourcePath,
+      sourceStart: clip.sourceStart,
+      sourceEnd: clip.sourceEnd,
+      bucket: clip.bucket,
+      label: clip.label,
+      startDeltaMs,
+      endDeltaMs
+    })
+    setQaResults((prev) => prev.map((r) => (r.originalPath === clip.originalPath ? updated : r)))
+    // Clear approval since the clip has changed
+    setApprovedClips((prev) => {
+      const next = new Set(prev)
+      next.delete(clip.originalPath)
+      return next
+    })
+  }, [])
+
+  const handleApprove = useCallback((clip: ClipQaResult) => {
+    setApprovedClips((prev) => {
+      const next = new Set(prev)
+      next.add(clip.originalPath)
+      return next
+    })
+  }, [])
+
+  const handleFinalPush = useCallback(async () => {
+    const approved = qaResults.filter(
+      (r) => r.status === 'clean' || r.status === 'auto_fixed' || approvedClips.has(r.originalPath)
+    )
+    if (approved.length === 0) return
+
+    const bucketClips: Record<BucketType, Clip[]> = {
+      hook: [],
+      meat: [],
+      cta: []
+    }
+
+    for (const result of approved) {
+      const meta = await window.api.getMetadata(result.path)
+      let thumbnail: string | undefined
+      try {
+        thumbnail = await window.api.getThumbnail(result.path)
+      } catch {}
+
+      bucketClips[result.bucket].push({
+        id: uuidv4(),
+        path: result.path,
+        name: `${result.label}.mp4`,
+        duration: meta.duration,
+        thumbnail
+      })
+    }
+
+    for (const [bucket, clips] of Object.entries(bucketClips)) {
+      if (clips.length > 0) {
+        addClips(bucket as BucketType, clips)
+      }
+    }
+
+    setStep('done')
+  }, [qaResults, approvedClips, addClips])
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -731,7 +881,7 @@ export function ClipSplitter() {
             <div className="flex items-center justify-end gap-2 pt-1">
               <Button
                 variant="outline"
-                onClick={handleSaveToDisk}
+                onClick={() => handleSplit('save')}
                 disabled={markers.length === 0}
                 className="gap-1.5"
               >
@@ -739,7 +889,7 @@ export function ClipSplitter() {
                 Save to Disk
               </Button>
               <Button
-                onClick={handlePushToBuckets}
+                onClick={() => handleSplit('push')}
                 disabled={markers.length === 0}
                 className="gap-1.5"
               >
@@ -762,20 +912,92 @@ export function ClipSplitter() {
           </div>
         )}
 
+        {/* QA Step */}
+        {step === 'qa' && (
+          <div className="flex flex-col gap-3 min-h-0 flex-1 overflow-hidden">
+            {qaBusy ? (
+              <div className="flex flex-col items-center justify-center gap-4 py-12">
+                <Loader2 className="w-10 h-10 animate-spin text-primary" />
+                <div className="text-center">
+                  <p className="text-sm font-medium">Running boundary QA...</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Verifying clip edges for marker contamination
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 text-xs font-semibold">
+                  <ShieldCheck className="h-3.5 w-3.5" />
+                  Boundary QA Results
+                  <span className="ml-auto font-normal text-muted-foreground">
+                    {qaResults.filter((r) => r.status === 'flagged').length > 0
+                      ? `${qaResults.filter((r) => r.status === 'flagged').length} need review`
+                      : `${qaResults.filter((r) => r.status === 'auto_fixed').length} auto-fixed`}
+                  </span>
+                </div>
+
+                <ScrollArea className="flex-1 min-h-0">
+                  <div className="space-y-1.5 pr-2">
+                    {qaResults.map((clip) => (
+                      <QaRowInline
+                        key={`${clip.bucket}:${clip.originalPath}`}
+                        clip={clip}
+                        approved={approvedClips.has(clip.originalPath)}
+                        onNudge={handleNudge}
+                        onApprove={handleApprove}
+                      />
+                    ))}
+                  </div>
+                </ScrollArea>
+
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  {splitAction === 'push' && (
+                    <Button
+                      onClick={handleFinalPush}
+                      disabled={
+                        qaResults.filter(
+                          (r) => r.status === 'clean' || r.status === 'auto_fixed' || approvedClips.has(r.originalPath)
+                        ).length === 0
+                      }
+                      className="gap-1.5"
+                    >
+                      <ArrowRight className="w-4 h-4" />
+                      Push to Buckets
+                    </Button>
+                  )}
+                  {splitAction === 'save' && (
+                    <Button onClick={() => setStep('done')} className="gap-1.5">
+                      <CheckCircle className="w-4 h-4" />
+                      Done
+                    </Button>
+                  )}
+                  <Button variant="outline" onClick={() => setOpen(false)}>
+                    Close
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {/* Done Step */}
         {step === 'done' && (
           <div className="flex flex-col items-center justify-center gap-4 py-12">
             <CheckCircle className="w-12 h-12 text-green-500" />
             <div className="text-center">
               <p className="text-sm font-medium">
-                Split into {splitResults.length} clips
+                {splitAction === 'save'
+                  ? `Saved ${splitResults.length} clips to disk`
+                  : `Pushed ${qaResults.filter((r) => r.status === 'clean' || r.status === 'auto_fixed' || approvedClips.has(r.originalPath)).length} clips to buckets`}
               </p>
               <div className="mt-3 space-y-1">
-                {splitResults.map((r, i) => (
+                {qaResults.map((r, i) => (
                   <div key={i} className="text-xs text-muted-foreground">
-                    <span className={BUCKET_COLORS_TEXT[r.bucket as BucketType]}>{r.label}</span>
+                    <span className={BUCKET_COLORS_TEXT[r.bucket]}>{r.label}</span>
                     {' \u2192 '}
                     {r.bucket}
+                    {r.status === 'flagged' && !approvedClips.has(r.originalPath) ? ' (skipped)' : ''}
                   </div>
                 ))}
               </div>

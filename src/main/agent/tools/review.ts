@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import { z } from 'zod'
+import { isWindowAlive } from '../window-guard'
 import type { BatchEditAgentTool, ToolContextState } from './types'
 import { stringifyToolResult } from './types'
 
@@ -50,7 +51,7 @@ export function createReviewTools(ctx: ToolContextState): BatchEditAgentTool[] {
       description: 'Log an agent progress message to the renderer timeline.',
       parameters: logProgressSchema,
       execute(args) {
-        ctx.win.webContents.send('agent:event', { runId: ctx.runId, type: 'logProgress', ...args })
+        if (isWindowAlive(ctx.win)) ctx.win.webContents.send('agent:event', { runId: ctx.runId, type: 'logProgress', ...args })
         return stringifyToolResult({ ok: true })
       }
     },
@@ -63,13 +64,15 @@ export function createReviewTools(ctx: ToolContextState): BatchEditAgentTool[] {
         const reviewId = uuidv4()
         const response = await new Promise<{ approved: boolean; edits?: unknown }>((resolve, reject) => {
           pendingReviews.set(reviewId, { resolve, reject })
-          ctx.win.webContents.send('agent:event', {
-            runId: ctx.runId,
-            type: 'review_requested',
-            reviewId,
-            reason: args.reason,
-            attach: args.attach ?? {}
-          })
+          if (isWindowAlive(ctx.win)) {
+            ctx.win.webContents.send('agent:event', {
+              runId: ctx.runId,
+              type: 'review_requested',
+              reviewId,
+              reason: args.reason,
+              attach: args.attach ?? {}
+            })
+          }
         })
         if (args.reason === 'ready_to_render' && response.approved) {
           ctx.approvedRenderAtTurn = Date.now()

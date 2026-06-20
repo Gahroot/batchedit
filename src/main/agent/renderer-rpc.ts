@@ -1,5 +1,6 @@
 import { ipcMain, type BrowserWindow } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
+import { isWindowAlive } from './window-guard'
 
 interface PendingRendererCall {
   resolve: (value: unknown) => void
@@ -42,19 +43,23 @@ export function callRenderer<T>(
   signal?: AbortSignal,
   timeoutMs = DEFAULT_TIMEOUT_MS
 ): Promise<T> {
+  if (!isWindowAlive(win)) {
+    return Promise.reject(new Error(`Renderer window is no longer alive – cannot call ${channel}`))
+  }
+
   const id = uuidv4()
 
   return new Promise<T>((resolve, reject) => {
     const timeout = setTimeout(() => {
       pending.delete(id)
-      win.webContents.send(`${channel}:cancel`, { id })
+      if (isWindowAlive(win)) win.webContents.send(`${channel}:cancel`, { id })
       reject(new Error(`Renderer RPC timed out on ${channel}`))
     }, timeoutMs)
 
     const abort = (): void => {
       pending.delete(id)
       clearTimeout(timeout)
-      win.webContents.send(`${channel}:cancel`, { id })
+      if (isWindowAlive(win)) win.webContents.send(`${channel}:cancel`, { id })
       reject(new Error('aborted'))
     }
 

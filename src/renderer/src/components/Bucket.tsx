@@ -29,7 +29,6 @@ import {
   ContextMenuSeparator
 } from '@/components/ui/context-menu'
 import { BlurText } from '@/components/ui/blur-text'
-import { toast } from 'sonner'
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mkv', '.webm']
 
@@ -412,7 +411,7 @@ export function Bucket({ type, label, color }: BucketProps) {
                                 <Pencil className="w-3.5 h-3.5 mr-2" /> Edit clip
                               </ContextMenuItem>
                               <ContextMenuItem
-                                onSelect={() => toast.info('Reveal in folder: coming soon')}
+                                onSelect={() => window.api.showItemInFolder(clip.path)}
                               >
                                 <FileVideo className="w-3.5 h-3.5 mr-2" /> Reveal in folder
                               </ContextMenuItem>
