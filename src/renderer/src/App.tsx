@@ -14,6 +14,7 @@ import { toast } from 'sonner'
 import { NumberTicker } from '@/components/ui/number-ticker'
 import { AgentPanel } from './components/AgentPanel'
 import { FFmpegBanner } from './components/FFmpegBanner'
+import { FirstRunGuide } from './components/FirstRunGuide'
 import { AgentReviewModal } from './components/AgentReviewModal'
 import { useAgentEvents } from './hooks/useAgentEvents'
 import { useAgentRenderBridge } from './hooks/useAgentRenderBridge'
@@ -101,6 +102,9 @@ function App() {
       {/* Settings */}
       <SettingsBar />
       <Separator />
+
+      {/* First-run orientation (hidden once any clip exists) */}
+      <FirstRunGuide />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Main Content - Three Buckets */}
