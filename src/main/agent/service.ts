@@ -144,7 +144,11 @@ export class AgentService {
    * event), so this only needs to re-cut and re-verify under the run allowlist.
    */
   async qaRecut(params: ManualRecutParams): Promise<ClipQaResult> {
-    if (!this.currentRun) throw new Error('No active agent run')
+    if (!this.currentRun) {
+      throw new Error(
+        'Boundary QA recut needs an active agent run — start a new run, or use Approve to keep the clip as-is.'
+      )
+    }
     return manualRecutClip(this.currentRun.ctx, params, this.currentRun.controller.signal)
   }
 
