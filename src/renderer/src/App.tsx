@@ -10,6 +10,7 @@ import { TemplateEditor } from './components/TemplateEditor'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { Toaster } from '@/components/ui/sonner'
+import { toast } from 'sonner'
 import { NumberTicker } from '@/components/ui/number-ticker'
 import { AgentPanel } from './components/AgentPanel'
 import { AgentReviewModal } from './components/AgentReviewModal'
@@ -27,6 +28,20 @@ function App() {
   const saveProject = useStore((s) => s.saveProject)
   const loadProject = useStore((s) => s.loadProject)
 
+  const handleSave = async (): Promise<void> => {
+    const path = await saveProject()
+    if (path) toast.success(`Saved to ${path}`)
+  }
+
+  const handleLoad = async (): Promise<void> => {
+    const result = await loadProject()
+    if (result.ok) {
+      toast.success('Project loaded')
+    } else if (result.reason === 'corrupt') {
+      toast.error("Couldn't load project file — it may be corrupt")
+    }
+  }
+
   return (
     <div className="flex flex-col h-screen overflow-hidden">
       {/* Header */}
@@ -35,11 +50,27 @@ function App() {
           <Film className="w-6 h-6 text-primary" />
           <h1 className="text-lg font-semibold">BatchEdit</h1>
           <div className="flex items-center gap-1 ml-2">
-            <Button variant="ghost" size="sm" onClick={() => saveProject()} title="Save Project">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleSave}
+              title="Save Project"
+              aria-label="Save Project"
+              className="gap-1.5"
+            >
               <Save className="w-4 h-4" />
+              <span className="text-xs">Save</span>
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => loadProject()} title="Load Project">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleLoad}
+              title="Load Project"
+              aria-label="Load Project"
+              className="gap-1.5"
+            >
               <FolderOpen className="w-4 h-4" />
+              <span className="text-xs">Load</span>
             </Button>
           </div>
         </div>

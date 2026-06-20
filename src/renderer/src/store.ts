@@ -102,6 +102,10 @@ export interface ReviewResponse {
   edits?: unknown
 }
 
+export type LoadProjectResult =
+  | { ok: true }
+  | { ok: false; reason: 'cancelled' | 'corrupt' }
+
 export type CaptionAnimation = 'karaoke-fill' | 'word-pop' | 'fade-in' | 'glow'
 
 export interface CaptionStyle {
@@ -259,7 +263,7 @@ interface AppState {
   getTotalCombinations: () => number
   getCombos: () => Combo[]
   saveProject: () => Promise<string | null>
-  loadProject: () => Promise<boolean>
+  loadProject: () => Promise<LoadProjectResult>
   reset: () => void
 }
 
@@ -518,7 +522,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   loadProject: async () => {
     const data = await window.api.loadProject()
-    if (!data) return false
+    if (!data) return { ok: false, reason: 'cancelled' }
     try {
       const project = JSON.parse(data)
       set({
@@ -541,9 +545,9 @@ export const useStore = create<AppState>((set, get) => ({
         agentReviewPrompt: null,
         qaClips: []
       })
-      return true
+      return { ok: true }
     } catch {
-      return false
+      return { ok: false, reason: 'corrupt' }
     }
   },
 
