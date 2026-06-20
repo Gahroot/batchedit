@@ -1,4 +1,4 @@
-import { AlertCircle, Bot, CheckCircle2, Clock, Copy, Loader2, Play, Square } from 'lucide-react'
+import { AlertCircle, Bot, CheckCircle2, Clock, Copy, FolderOpen, Loader2, Play, Square } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -111,6 +111,76 @@ function formatEventForClipboard(event: AgentEventRecord, index: number): string
   return details ? `${header}\n${details}` : header
 }
 
+/**
+ * Human-readable wrap-up rendered in place of the bare "Agent finished" line.
+ * Reads the renderer store snapshot the agent just populated (buckets, chosen
+ * caption template, render results, output folder) so the user can see what was
+ * created and jump straight to the files.
+ */
+function AgentDoneSummary(): React.JSX.Element {
+  const hooks = useStore((state) => state.hooks)
+  const meats = useStore((state) => state.meats)
+  const ctas = useStore((state) => state.ctas)
+  const captionStyle = useStore((state) => state.captionStyle)
+  const targetPlatform = useStore((state) => state.targetPlatform)
+  const renderProgress = useStore((state) => state.renderProgress)
+  const outputDirectory = useStore((state) => state.settings.outputDirectory)
+
+  const clipCount = hooks.length + meats.length + ctas.length
+  const doneRenders = renderProgress.filter((rp) => rp.status === 'done').length
+  const totalRenders = renderProgress.length
+
+  const openOutputFolder = async (): Promise<void> => {
+    if (!outputDirectory) return
+    const error = await window.api.openPath(outputDirectory)
+    if (error) toast.error(`Could not open output folder: ${error}`)
+  }
+
+  return (
+    <div className="mt-1 space-y-1.5">
+      <dl className="space-y-0.5">
+        <div className="flex justify-between gap-2">
+          <dt className="text-muted-foreground">Clips created</dt>
+          <dd className="text-right font-medium">
+            {clipCount} ({hooks.length} hook · {meats.length} meat · {ctas.length} CTA)
+          </dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-muted-foreground">Template</dt>
+          <dd className="text-right font-medium">
+            {captionStyle.label} · {targetPlatform}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-muted-foreground">Renders</dt>
+          <dd className="text-right font-medium">
+            {totalRenders > 0 ? `${doneRenders}/${totalRenders} complete` : 'none queued'}
+          </dd>
+        </div>
+        {outputDirectory ? (
+          <div className="flex justify-between gap-2">
+            <dt className="text-muted-foreground">Output</dt>
+            <dd className="min-w-0 truncate text-right font-medium" title={outputDirectory}>
+              {outputDirectory}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+      {outputDirectory ? (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={openOutputFolder}
+          className="h-7 w-full text-xs"
+        >
+          <FolderOpen className="mr-2 h-3.5 w-3.5" />
+          Open output folder
+        </Button>
+      ) : null}
+    </div>
+  )
+}
+
 export function AgentPanel() {
   const [runId, setRunId] = useState<string | null>(null)
   const [sourcePath, setSourcePath] = useState<string | null>(null)
@@ -175,10 +245,15 @@ export function AgentPanel() {
   return (
     <aside className="flex h-full w-80 shrink-0 flex-col border-l bg-card">
       <div className="border-b p-4">
-        <div className="mb-3 flex items-center gap-2 font-semibold">
+        <div className="mb-1.5 flex items-center gap-2 font-semibold">
           <Bot className="h-4 w-4" />
           Agent
         </div>
+        <p className="mb-3 text-xs leading-snug text-muted-foreground">
+          Run Agent autonomously turns one raw recording into a render queue — it ingests, transcribes,
+          detects “Hook/Meat/CTA” markers, splits and analyzes clips, picks a template, then queues the batch.
+          Needs a source video, an API key, and an output folder.
+        </p>
         <div className="flex gap-2">
           <TooltipProvider>
             <Tooltip>
@@ -229,6 +304,7 @@ export function AgentPanel() {
                     <EventIcon event={event} />
                     <div className="min-w-0 flex-1">
                       <div className="break-words font-medium">{eventLabel(event)}</div>
+                      {event.type === 'agent_done' ? <AgentDoneSummary /> : null}
                       {details ? (
                         <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words rounded bg-background/70 p-2 font-mono text-[10px] text-foreground">
                           {details}
