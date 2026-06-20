@@ -13,6 +13,7 @@ import { Toaster } from '@/components/ui/sonner'
 import { toast } from 'sonner'
 import { NumberTicker } from '@/components/ui/number-ticker'
 import { AgentPanel } from './components/AgentPanel'
+import { FFmpegBanner } from './components/FFmpegBanner'
 import { AgentReviewModal } from './components/AgentReviewModal'
 import { useAgentEvents } from './hooks/useAgentEvents'
 import { useAgentRenderBridge } from './hooks/useAgentRenderBridge'
@@ -93,6 +94,9 @@ function App() {
           </AnimatePresence>
         </div>
       </header>
+
+      {/* Video engine readiness warning */}
+      <FFmpegBanner />
 
       {/* Settings */}
       <SettingsBar />

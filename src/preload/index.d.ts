@@ -167,6 +167,7 @@ interface Api {
   getDefaultOutputDirectory: () => Promise<string | null>
   showItemInFolder: (fullPath: string) => Promise<void>
   openPath: (fullPath: string) => Promise<string>
+  getFFmpegReadiness: () => Promise<{ ready: boolean; issues: string[] }>
   getMetadata: (filePath: string) => Promise<VideoMetadata>
   extractAudio: (videoPath: string) => Promise<string>
   generateAss: (

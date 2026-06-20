@@ -3,7 +3,7 @@ import { app, shell, BrowserWindow, ipcMain, dialog, clipboard } from 'electron'
 import { join } from 'path'
 import { readFile, writeFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { setupFFmpeg } from './ffmpeg'
+import { setupFFmpeg, getFFmpegReadiness } from './ffmpeg'
 import { setupRenderPipeline, clearNormalizedCache, clearTrackedTempFiles } from './render-pipeline'
 import { setupAgent } from './agent/ipc'
 import { setupQaIpc } from './qa-ipc'
@@ -97,6 +97,13 @@ app.whenReady().then(() => {
 
   // Setup FFmpeg paths
   setupFFmpeg()
+
+  // IPC: Report FFmpeg/ffprobe readiness so the renderer can warn the user
+  // when the bundled binaries fail to resolve (packaged builds, AV quarantine).
+  ipcMain.handle('ffmpeg:getReadiness', async (): Promise<{ ready: boolean; issues: string[] }> => {
+    const { ready, issues } = getFFmpegReadiness()
+    return { ready, issues }
+  })
 
   // Setup IPC handlers for render pipeline
   setupRenderPipeline()

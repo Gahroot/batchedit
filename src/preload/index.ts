@@ -13,6 +13,7 @@ const api = {
   openPath: (fullPath: string) => ipcRenderer.invoke('shell:openPath', fullPath),
 
   // FFmpeg
+  getFFmpegReadiness: () => ipcRenderer.invoke('ffmpeg:getReadiness'),
   getMetadata: (filePath: string) => ipcRenderer.invoke('ffmpeg:getMetadata', filePath),
   extractAudio: (videoPath: string) => ipcRenderer.invoke('ffmpeg:extractAudio', videoPath),
   generateAss: (
