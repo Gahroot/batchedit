@@ -52,8 +52,14 @@ export function ClipEditor({ open, onOpenChange, clipId, bucket }: ClipEditorPro
   const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null)
   const [isTrimming, setIsTrimming] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [pendingDropCount, setPendingDropCount] = useState<number | null>(null)
 
   const transcript = clip?.transcript
+
+  // Any change to the trim window invalidates a pending drop confirmation.
+  useEffect(() => {
+    setPendingDropCount(null)
+  }, [trimStart, trimEnd])
 
   // Transcribe on first open if no transcript
   useEffect(() => {
@@ -141,10 +147,11 @@ export function ClipEditor({ open, onOpenChange, clipId, bucket }: ClipEditorPro
     setTrimEnd(videoRef.current.currentTime)
   }, [])
 
-  const handleApplyTrim = useCallback(async () => {
+  const performTrim = useCallback(async () => {
     if (!clip || trimStart === null || trimEnd === null) return
     if (trimEnd <= trimStart) return
 
+    setPendingDropCount(null)
     setIsTrimming(true)
     setError(null)
     try {
@@ -176,6 +183,24 @@ export function ClipEditor({ open, onOpenChange, clipId, bucket }: ClipEditorPro
       setIsTrimming(false)
     }
   }, [clip, trimStart, trimEnd, transcript, bucket, clipId, updateClipPath, setClipTranscript])
+
+  // Number of transcript words that fall outside the trim window and would be dropped.
+  const droppedWordCount = useCallback((): number => {
+    if (!transcript || trimStart === null || trimEnd === null) return 0
+    return transcript.filter((w) => !(w.end > trimStart && w.start < trimEnd)).length
+  }, [transcript, trimStart, trimEnd])
+
+  // Guard the trim: if words would be silently dropped, ask the user to confirm first.
+  const handleApplyTrim = useCallback(() => {
+    if (!clip || trimStart === null || trimEnd === null) return
+    if (trimEnd <= trimStart) return
+    const dropped = droppedWordCount()
+    if (dropped > 0) {
+      setPendingDropCount(dropped)
+      return
+    }
+    void performTrim()
+  }, [clip, trimStart, trimEnd, droppedWordCount, performTrim])
 
   if (!clip) return null
 
@@ -238,6 +263,35 @@ export function ClipEditor({ open, onOpenChange, clipId, bucket }: ClipEditorPro
             />
           )}
         </div>
+
+        {/* Drop-words confirmation */}
+        {pendingDropCount !== null && (
+          <div className="bg-yellow-500/10 border border-yellow-500/40 text-yellow-200 text-xs px-3 py-2 rounded-md flex items-center gap-2">
+            <span className="flex-1">
+              This trim will remove {pendingDropCount} transcript{' '}
+              {pendingDropCount === 1 ? 'word' : 'words'} (including any edits) outside the trim
+              window. Continue?
+            </span>
+            <Button
+              size="sm"
+              className="h-7 text-xs gap-1"
+              onClick={() => void performTrim()}
+              disabled={isTrimming}
+            >
+              {isTrimming ? <Loader2 className="w-3 h-3 animate-spin" /> : <Scissors className="w-3 h-3" />}
+              Remove &amp; Trim
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={() => setPendingDropCount(null)}
+              disabled={isTrimming}
+            >
+              Cancel
+            </Button>
+          </div>
+        )}
 
         {/* Trim Controls */}
         <div className="flex items-center gap-2 text-xs">
