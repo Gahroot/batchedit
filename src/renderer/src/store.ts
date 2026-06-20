@@ -299,6 +299,13 @@ interface AppState {
   reset: () => void
 }
 
+/** Default positions for template elements, as percentages of the 1080×1920 canvas. */
+export const DEFAULT_TEMPLATE_LAYOUT: TemplateLayout = {
+  titleText: { x: 50, y: 12 },
+  subtitles: { x: 50, y: 65 },
+  media: { x: 50, y: 75 }
+}
+
 const RESOLUTIONS = {
   '9:16': { width: 1080, height: 1920, label: '9:16 Vertical (1080x1920)' },
   '16:9': { width: 1920, height: 1080, label: '16:9 Landscape (1920x1080)' },
@@ -329,11 +336,7 @@ export const useStore = create<AppState>((set, get) => ({
   hookTextProgress: null,
   targetPlatform: 'universal',
   setTargetPlatform: (platform) => set({ targetPlatform: platform }),
-  templateLayout: {
-    titleText: { x: 50, y: 12 },
-    subtitles: { x: 50, y: 65 },
-    media: { x: 50, y: 75 }
-  },
+  templateLayout: DEFAULT_TEMPLATE_LAYOUT,
   mediaOverlays: { meat: null, cta: null },
   whisperModel: localStorage.getItem('batchedit-whisper-model') || 'onnx-community/whisper-large-v3-turbo_timestamped',
   setWhisperModel: (model) => {
@@ -584,7 +587,7 @@ export const useStore = create<AppState>((set, get) => ({
         hookTexts: project.hookTexts || {},
         settings: project.settings || { resolution: RESOLUTIONS['9:16'], outputDirectory: null },
         captionStyle: project.captionStyle || CAPTION_PRESETS['hormozi-bold'],
-        templateLayout: project.templateLayout || { titleText: { x: 50, y: 12 }, subtitles: { x: 50, y: 65 }, media: { x: 50, y: 75 } },
+        templateLayout: project.templateLayout || DEFAULT_TEMPLATE_LAYOUT,
         targetPlatform: project.targetPlatform || 'universal',
         mediaOverlays: project.mediaOverlays || { meat: null, cta: null },
         autoTrimSilence: project.autoTrimSilence || false,

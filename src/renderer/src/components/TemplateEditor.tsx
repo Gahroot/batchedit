@@ -1,6 +1,6 @@
-import { useRef, useCallback, useState, useEffect, useMemo } from 'react'
-import { LayoutTemplate, Type, Captions, Image } from 'lucide-react'
-import { useStore, TemplateLayout, Platform } from '../store'
+import { useRef, useCallback, useState, useMemo } from 'react'
+import { LayoutTemplate, Type, Image, RotateCcw } from 'lucide-react'
+import { useStore, TemplateLayout, Platform, CaptionStyle, DEFAULT_TEMPLATE_LAYOUT } from '../store'
 import { DndContext, useDraggable, DragEndEvent, DragMoveEvent } from '@dnd-kit/core'
 import { restrictToParentElement } from '@dnd-kit/modifiers'
 import { Button } from '@/components/ui/button'
@@ -64,6 +64,36 @@ function DraggableElement({
 
 const SNAP_THRESHOLD_PX = 8
 
+/** Renders a small sample line in the selected caption style so the preview reflects real output. */
+function CaptionSample({ style, text }: { style: CaptionStyle; text: string }): React.JSX.Element {
+  const isGlow = style.animation === 'glow'
+  const isBox = style.borderStyle === 3
+  const textShadow = isGlow
+    ? `0 0 6px ${style.outlineColor}, 0 0 12px ${style.outlineColor}, 0 0 2px ${style.outlineColor}`
+    : isBox
+      ? 'none'
+      : style.outline === 0 && style.shadow > 0
+        ? `1px 1px ${style.shadow}px ${style.outlineColor}`
+        : `0 0 ${style.outline}px ${style.outlineColor}`
+
+  return (
+    <span
+      className="font-bold leading-tight text-center whitespace-nowrap select-none"
+      style={{
+        fontSize: 16,
+        color: style.highlightColor,
+        textShadow,
+        backgroundColor: isBox ? 'rgba(25,25,25,0.78)' : 'transparent',
+        padding: isBox ? '2px 8px' : '0',
+        borderRadius: isBox ? 4 : 0,
+        textTransform: style.id === 'hormozi-bold' ? 'uppercase' : 'none'
+      }}
+    >
+      {text}
+    </span>
+  )
+}
+
 export function TemplateEditor() {
   const canvasRef = useRef<HTMLDivElement>(null)
   const snappedRef = useRef({ x: false, y: false })
@@ -73,6 +103,24 @@ export function TemplateEditor() {
   const setTemplateLayout = useStore((s) => s.setTemplateLayout)
   const targetPlatform = useStore((s) => s.targetPlatform)
   const setTargetPlatform = useStore((s) => s.setTargetPlatform)
+  const hooks = useStore((s) => s.hooks)
+  const hookTexts = useStore((s) => s.hookTexts)
+  const captionStyle = useStore((s) => s.captionStyle)
+
+  // Dialog session: snapshot the layout on open so Cancel can revert in-session drags.
+  const [open, setOpen] = useState(false)
+  const sessionStartLayout = useRef<TemplateLayout | null>(null)
+
+  // Real preview content drawn from the user's first hook and selected caption style.
+  const firstHook = hooks[0]
+  const hookText = (firstHook && hookTexts[firstHook.id]?.trim()) || ''
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      if (next) sessionStartLayout.current = templateLayout
+      setOpen(next)
+    },
+    [templateLayout]
+  )
 
   const aspectRatio = settings.resolution.width / settings.resolution.height
   const canvasHeight = 420
@@ -181,7 +229,7 @@ export function TemplateEditor() {
   }
 
   return (
-    <Dialog>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm" className="gap-1.5">
           <LayoutTemplate className="w-4 h-4" />
@@ -309,30 +357,42 @@ export function TemplateEditor() {
                 }}
               />
 
-              {/* Person silhouette */}
-              <div className="absolute inset-0 flex items-center justify-center opacity-10">
-                <div className="w-24 h-52 bg-white rounded-full" />
-              </div>
-
-              {/* Title Text */}
-              <DraggableElement id="titleText" position={templateLayout.titleText}>
-                <div className="flex items-center gap-1.5 bg-violet-500 rounded-full px-4 py-1.5 text-white text-sm font-semibold whitespace-nowrap select-none">
-                  <Type className="w-3.5 h-3.5" />
-                  Title Text
+              {/* Real clip frame as background, or a neutral silhouette fallback */}
+              {firstHook?.thumbnail ? (
+                <img
+                  src={firstHook.thumbnail}
+                  alt=""
+                  draggable={false}
+                  className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none"
+                />
+              ) : (
+                <div className="absolute inset-0 flex items-center justify-center opacity-10 pointer-events-none">
+                  <div className="w-24 h-52 bg-white rounded-full" />
                 </div>
+              )}
+
+              {/* Title Text — the user's real hook text when present */}
+              <DraggableElement id="titleText" position={templateLayout.titleText}>
+                {hookText ? (
+                  <div className="max-w-[80%] bg-violet-500 rounded-full px-4 py-1.5 text-white text-sm font-semibold text-center select-none">
+                    {hookText}
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 bg-violet-500/80 rounded-full px-4 py-1.5 text-white/90 text-sm font-semibold whitespace-nowrap select-none">
+                    <Type className="w-3.5 h-3.5" />
+                    Title Text
+                  </div>
+                )}
               </DraggableElement>
 
-              {/* Subtitles */}
+              {/* Subtitles — a sample rendered in the selected caption style */}
               <DraggableElement id="subtitles" position={templateLayout.subtitles}>
-                <div className="flex items-center gap-1.5 text-white font-bold text-lg whitespace-nowrap select-none drop-shadow-lg">
-                  <Captions className="w-4 h-4" />
-                  Subtitles
-                </div>
+                <CaptionSample style={captionStyle} text="Sample captions" />
               </DraggableElement>
 
               {/* Media */}
               <DraggableElement id="media" position={templateLayout.media}>
-                <div className="flex items-center justify-center gap-1.5 border-2 border-dashed border-white/50 rounded-xl px-6 py-4 text-white/50 text-sm whitespace-nowrap select-none">
+                <div className="flex items-center justify-center gap-1.5 border-2 border-dashed border-white/50 rounded-xl px-6 py-4 text-white/70 text-sm whitespace-nowrap select-none">
                   <Image className="w-4 h-4" />
                   Media
                 </div>
@@ -346,6 +406,33 @@ export function TemplateEditor() {
             <span className="font-mono">
               Safe: {CANVAS_W - deadZone.left - deadZone.right}&times;{CANVAS_H - deadZone.top - deadZone.bottom}
             </span>
+          </div>
+
+          <div className="flex items-center justify-between gap-2 w-full pt-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => setTemplateLayout(DEFAULT_TEMPLATE_LAYOUT)}
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Reset to default
+            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  if (sessionStartLayout.current) setTemplateLayout(sessionStartLayout.current)
+                  setOpen(false)
+                }}
+              >
+                Cancel
+              </Button>
+              <Button size="sm" onClick={() => setOpen(false)}>
+                Done
+              </Button>
+            </div>
           </div>
         </div>
       </DialogContent>
