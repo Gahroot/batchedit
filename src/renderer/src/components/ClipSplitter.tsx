@@ -431,6 +431,9 @@ export function ClipSplitter() {
     setSplitProgress(0)
     setError(null)
 
+    const unsubscribeProgress = window.api.onSplitProgress(({ completed, total }) => {
+      setSplitProgress(total > 0 ? Math.round((completed / total) * 100) : 0)
+    })
     try {
       const segments = markers.map((m) => ({
         label: m.label,
@@ -480,6 +483,7 @@ export function ClipSplitter() {
       setError(err instanceof Error ? err.message : String(err))
       setStep('review')
     } finally {
+      unsubscribeProgress()
       setQaBusy(false)
     }
   }, [videoPath, markers])
@@ -967,8 +971,11 @@ export function ClipSplitter() {
           <div className="flex flex-col items-center justify-center gap-4 py-12">
             <Loader2 className="w-10 h-10 animate-spin text-primary" />
             <div className="text-center">
-              <p className="text-sm font-medium">Splitting video...</p>
+              <p className="text-sm font-medium">
+                Splitting {markers.length} segment{markers.length === 1 ? '' : 's'}…
+              </p>
               <Progress value={splitProgress} className="w-64 mt-3" />
+              <p className="text-xs text-muted-foreground mt-1">{splitProgress}%</p>
             </div>
           </div>
         )}

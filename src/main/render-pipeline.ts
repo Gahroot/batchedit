@@ -804,13 +804,19 @@ export function setupRenderPipeline(): void {
   ipcMain.handle(
     'ffmpeg:splitVideo',
     async (
-      _event,
+      event,
       videoPath: string,
       segments: Array<{ label: string; bucket: string; startTime: number; endTime: number }>,
       outputDir: string | null
     ) => {
       const dir = outputDir || join(tmpdir(), `batchedit-split-${uuidv4()}`)
       mkdirSync(dir, { recursive: true })
+
+      const total = segments.length
+      const sendProgress = (completed: number): void => {
+        event.sender.send('split:progress', { completed, total })
+      }
+      sendProgress(0)
 
       const results: Array<{ label: string; bucket: string; outputPath: string }> = []
       const nameCount = new Map<string, number>()
@@ -822,6 +828,7 @@ export function setupRenderPipeline(): void {
         const outputPath = join(dir, `${fileName}.mp4`)
         await trimVideo(videoPath, outputPath, seg.startTime, seg.endTime)
         results.push({ label: seg.label, bucket: seg.bucket, outputPath })
+        sendProgress(results.length)
       }
       return results
     }

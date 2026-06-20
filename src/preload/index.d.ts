@@ -193,6 +193,7 @@ interface Api {
     segments: Array<{ label: string; bucket: string; startTime: number; endTime: number }>,
     outputDir: string | null
   ): Promise<Array<{ label: string; bucket: string; outputPath: string }>>
+  onSplitProgress: (callback: (progress: { completed: number; total: number }) => void) => () => void
   trimVideoReencode: (videoPath: string, outputDir: string | null, startTime: number, endTime: number) => Promise<string>
   detectLeadingSilence: (videoPath: string) => Promise<number>
   trimLeadingSilence: (videoPath: string, outputDir?: string) => Promise<{ outputPath: string; trimmedSeconds: number }>

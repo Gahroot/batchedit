@@ -46,6 +46,11 @@ const api = {
     segments: Array<{ label: string; bucket: string; startTime: number; endTime: number }>,
     outputDir: string | null
   ) => ipcRenderer.invoke('ffmpeg:splitVideo', videoPath, segments, outputDir),
+  onSplitProgress: (callback: (progress: { completed: number; total: number }) => void) => {
+    const handler = (_event: any, progress: { completed: number; total: number }) => callback(progress)
+    ipcRenderer.on('split:progress', handler)
+    return () => ipcRenderer.removeListener('split:progress', handler)
+  },
 
   // Re-encoding trim (frame-accurate)
   trimVideoReencode: (videoPath: string, outputDir: string | null, startTime: number, endTime: number) =>
