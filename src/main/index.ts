@@ -131,6 +131,19 @@ app.whenReady().then(() => {
     return result.filePaths[0] || null
   })
 
+  // IPC: Suggest a sensible default output directory on first run (overridable)
+  ipcMain.handle('app:getDefaultOutputDirectory', async (): Promise<string | null> => {
+    try {
+      return app.getPath('videos')
+    } catch {
+      try {
+        return app.getPath('desktop')
+      } catch {
+        return null
+      }
+    }
+  })
+
   // IPC: Reveal a file in the OS file browser (highlighting it)
   ipcMain.handle('shell:showItemInFolder', async (_event, fullPath: string): Promise<void> => {
     if (typeof fullPath !== 'string' || fullPath.length === 0) return

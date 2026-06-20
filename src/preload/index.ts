@@ -6,6 +6,7 @@ const api = {
   openFiles: () => ipcRenderer.invoke('dialog:openFiles'),
   openImages: () => ipcRenderer.invoke('dialog:openImages'),
   openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+  getDefaultOutputDirectory: () => ipcRenderer.invoke('app:getDefaultOutputDirectory'),
 
   // Shell
   showItemInFolder: (fullPath: string) => ipcRenderer.invoke('shell:showItemInFolder', fullPath),

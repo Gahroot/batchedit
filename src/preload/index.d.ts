@@ -164,6 +164,7 @@ interface Api {
   openFiles: () => Promise<string[]>
   openImages: () => Promise<string[]>
   openDirectory: () => Promise<string | null>
+  getDefaultOutputDirectory: () => Promise<string | null>
   showItemInFolder: (fullPath: string) => Promise<void>
   openPath: (fullPath: string) => Promise<string>
   getMetadata: (filePath: string) => Promise<VideoMetadata>

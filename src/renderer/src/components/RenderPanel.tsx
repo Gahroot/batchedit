@@ -22,6 +22,12 @@ import { Slider } from '@/components/ui/slider'
 import { NumberTicker } from '@/components/ui/number-ticker'
 import { PermutationMatrix } from './PermutationMatrix'
 import { ShimmerButton } from '@/components/ui/shimmer-button'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger
+} from '@/components/ui/tooltip'
 import { toast } from 'sonner'
 import confetti from 'canvas-confetti'
 
@@ -51,6 +57,7 @@ export function RenderPanel() {
   const captionOffsetMs = useStore((s) => s.captionOffsetMs)
   const setCaptionOffsetMs = useStore((s) => s.setCaptionOffsetMs)
   const targetPlatform = useStore((s) => s.targetPlatform)
+  const setOutputDirectory = useStore((s) => s.setOutputDirectory)
 
   const { loadModel, transcribe, isModelLoading, isModelReady, isTranscribing, loadProgress } =
     useWhisper()
@@ -69,9 +76,38 @@ export function RenderPanel() {
     return unsubscribe
   }, [setRenderProgress])
 
+  // First-run convenience: suggest a sensible output folder (e.g. OS Videos/Desktop)
+  // when none is set yet. Always overridable by the user.
+  useEffect(() => {
+    if (useStore.getState().settings.outputDirectory) return
+    let cancelled = false
+    window.api.getDefaultOutputDirectory().then((dir) => {
+      if (!cancelled && dir && !useStore.getState().settings.outputDirectory) {
+        setOutputDirectory(dir)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [setOutputDirectory])
+
+  const handleChooseOutput = async (): Promise<void> => {
+    const dir = await window.api.openDirectory()
+    if (dir) setOutputDirectory(dir)
+  }
+
   const handleRender = async () => {
+    if (totalCombos === 0) {
+      toast.error('Add at least one Hook, Meat, and CTA')
+      return
+    }
     if (!settings.outputDirectory) {
-      alert('Please choose an output folder first.')
+      toast.error('Choose an output folder first', {
+        action: {
+          label: 'Choose Folder',
+          onClick: handleChooseOutput
+        }
+      })
       return
     }
 
@@ -323,6 +359,15 @@ export function RenderPanel() {
 
   const canRender = totalCombos > 0 && settings.outputDirectory && !isRendering
 
+  // Exact reason the Render button is disabled (excluding the in-progress state),
+  // surfaced via tooltip so first-run users know what to fix.
+  const disabledReason =
+    totalCombos === 0
+      ? 'Add at least one Hook, Meat, and CTA'
+      : !settings.outputDirectory
+        ? 'Choose an output folder first'
+        : null
+
   const handleCancelRender = async () => {
     const didCancel = await window.api.cancelRender(activeBatchId ?? undefined)
     if (didCancel) {
@@ -492,6 +537,20 @@ export function RenderPanel() {
               <Play className="w-4 h-4" />
               Render {renderCount === 'all' ? totalCombos : renderCount} Videos
             </ShimmerButton>
+          ) : disabledReason ? (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex">
+                    <Button size="lg" disabled className="pointer-events-none">
+                      <Play className="w-4 h-4" />
+                      Render {renderCount === 'all' ? totalCombos : renderCount} Videos
+                    </Button>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>{disabledReason}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           ) : (
             <Button size="lg" onClick={handleRender} disabled={!canRender}>
               {isRendering ? (
