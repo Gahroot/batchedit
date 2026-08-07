@@ -2,10 +2,10 @@ import type { BrowserWindow } from 'electron'
 import { z } from 'zod'
 import { detectMarkers } from '../shared/marker-detection'
 import type { BucketType, ClipQaResult, Leak, WordChunk } from '../shared/types'
+import { recutSourceClip } from './clip-recut'
 import { getVideoMetadata } from './ffmpeg'
-import { callRenderer } from './agent/renderer-rpc'
-import { readTranscriptCache, writeTranscriptCache } from './agent/transcript-cache'
-import { recutSourceClip } from './agent/tools/splits'
+import { requestQaTranscription } from './qa-renderer-rpc'
+import { readTranscriptCache, writeTranscriptCache } from './transcript-cache'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -53,7 +53,12 @@ async function transcribeClip(
   if (cached) return { words: cached.words, full: cached.full }
 
   const startedAt = Date.now()
-  const raw = await callRenderer<unknown>(win, 'agent:transcribe', { path, model }, signal, TRANSCRIBE_RPC_TIMEOUT_MS)
+  const raw = await requestQaTranscription<unknown>(
+    win,
+    { path, ...(model ? { model } : {}) },
+    TRANSCRIBE_RPC_TIMEOUT_MS,
+    signal
+  )
   const parsed = rendererTranscribeResultSchema.parse(raw)
   const fullText = parsed.words.map((w) => w.text).join(' ').trim()
   const result: TranscribeResult = { words: parsed.words, full: parsed.full ?? fullText }

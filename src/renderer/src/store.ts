@@ -1,6 +1,5 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
-import { DEFAULT_AGENT_MODEL_ID } from './agent-models'
 import type { BucketType, ClipQaResult, Platform, TemplateLayout, WordChunk } from '../../shared/types'
 
 export type { BucketType, ClipQaResult, Platform, TemplateLayout, WordChunk }
@@ -69,43 +68,6 @@ export interface ErrorLogEntry {
   message: string
   /** Raw technical detail (e.g. FFmpeg stderr) kept for bug reports / Copy. */
   detail?: string
-}
-
-export type AgentEvent = Record<string, unknown> & { type?: string; runId?: string }
-
-function qaKey(clip: ClipQaResult): string {
-  return `${clip.bucket}:${clip.label}`
-}
-
-function upsertQaClip(clips: ClipQaResult[], next: ClipQaResult): ClipQaResult[] {
-  const key = qaKey(next)
-  const index = clips.findIndex((c) => qaKey(c) === key)
-  if (index === -1) return [...clips, next]
-  const copy = clips.slice()
-  copy[index] = next
-  return copy
-}
-
-/** Fold a raw agent event into the QA-clip list (reset/upsert/replace). */
-function nextQaClips(clips: ClipQaResult[], event: AgentEvent): ClipQaResult[] {
-  if (event.type === 'qa_started') return []
-  if (event.type === 'qa_clip' && event.clip) return upsertQaClip(clips, event.clip as ClipQaResult)
-  if (event.type === 'qa_complete' && event.report && typeof event.report === 'object') {
-    const report = event.report as { clips?: ClipQaResult[] }
-    if (Array.isArray(report.clips)) return report.clips
-  }
-  return clips
-}
-
-export interface ReviewPrompt {
-  reviewId: string
-  reason: string
-  attach?: unknown
-}
-
-export interface ReviewResponse {
-  approved: boolean
-  edits?: unknown
 }
 
 export type LoadProjectResult =
@@ -229,12 +191,6 @@ interface AppState {
   // Gemini AI
   geminiApiKey: string
   setGeminiApiKey: (key: string) => void
-  // Xiaomi MiMo (OpenAI-compatible Token Plan endpoint)
-  xiaomiApiKey: string
-  setXiaomiApiKey: (key: string) => void
-  // Selected agent model id (see AGENT_MODELS)
-  agentModelId: string
-  setAgentModelId: (id: string) => void
   hookTextProgress: HookTextProgress | null
   setHookTextProgress: (progress: HookTextProgress | null) => void
 
@@ -266,19 +222,6 @@ interface AppState {
   errorLog: ErrorLogEntry[]
   addError: (entry: Omit<ErrorLogEntry, 'id' | 'timestamp'>) => void
   clearErrors: () => void
-
-  // Agent state
-  agentRunning: boolean
-  agentEvents: AgentEvent[]
-  agentReviewPrompt: ReviewPrompt | null
-  /** Live boundary-QA results, keyed by `${bucket}:${label}`, newest path wins. */
-  qaClips: ClipQaResult[]
-  appendAgentEvent: (event: AgentEvent) => void
-  setAgentReviewPrompt: (prompt: ReviewPrompt | null) => void
-  respondToReview: (response: ReviewResponse) => void
-  applyQaRecut: (clip: ClipQaResult, startDeltaMs: number, endDeltaMs: number) => Promise<void>
-  /** Accept a QA clip into its bucket (using its current, possibly recut, path) and clear it from the panel. */
-  resolveQaClip: (clip: ClipQaResult) => void
 
   // Actions
   addClips: (bucket: BucketType, clips: Clip[]) => void
@@ -331,8 +274,6 @@ export const useStore = create<AppState>((set, get) => ({
   captionProgress: null,
   captionStyle: CAPTION_PRESETS['hormozi-bold'],
   geminiApiKey: localStorage.getItem('batchedit-gemini-key') || '',
-  xiaomiApiKey: localStorage.getItem('batchedit-xiaomi-key') || '',
-  agentModelId: localStorage.getItem('batchedit-agent-model') || DEFAULT_AGENT_MODEL_ID,
   hookTextProgress: null,
   targetPlatform: 'universal',
   setTargetPlatform: (platform) => set({ targetPlatform: platform }),
@@ -350,10 +291,6 @@ export const useStore = create<AppState>((set, get) => ({
   setAutoTrimSilence: (enabled) => set({ autoTrimSilence: enabled }),
 
   errorLog: [],
-  agentRunning: false,
-  agentEvents: [],
-  agentReviewPrompt: null,
-  qaClips: [],
 
   setMediaOverlay: (bucket, path) =>
     set((state) => ({
@@ -368,14 +305,6 @@ export const useStore = create<AppState>((set, get) => ({
     localStorage.setItem('batchedit-gemini-key', key)
     set({ geminiApiKey: key })
   },
-  setXiaomiApiKey: (key) => {
-    localStorage.setItem('batchedit-xiaomi-key', key)
-    set({ xiaomiApiKey: key })
-  },
-  setAgentModelId: (id) => {
-    localStorage.setItem('batchedit-agent-model', id)
-    set({ agentModelId: id })
-  },
   setHookTextProgress: (progress) => set({ hookTextProgress: progress }),
   setTemplateLayout: (layout) => set({ templateLayout: layout }),
 
@@ -389,59 +318,6 @@ export const useStore = create<AppState>((set, get) => ({
 
   clearErrors: () => set({ errorLog: [] }),
 
-  appendAgentEvent: (event) =>
-    set((state) => {
-      const agentEvents = [...state.agentEvents, event].slice(-500)
-      const eventType = event.type
-      return {
-        agentEvents,
-        agentRunning: eventType === 'agent_started' ? true : eventType === 'agent_done' || eventType === 'agent_canceled' || eventType === 'error' || eventType === 'agent_failed' ? false : state.agentRunning,
-        agentReviewPrompt: eventType === 'review_requested'
-          ? { reviewId: String(event.reviewId), reason: String(event.reason), attach: event.attach }
-          : state.agentReviewPrompt,
-        qaClips: nextQaClips(state.qaClips, event)
-      }
-    }),
-
-  applyQaRecut: async (clip, startDeltaMs, endDeltaMs) => {
-    const updated = await window.api.agent.qaRecut({
-      clipPath: clip.path,
-      sourcePath: clip.sourcePath,
-      sourceStart: clip.sourceStart,
-      sourceEnd: clip.sourceEnd,
-      bucket: clip.bucket,
-      label: clip.label,
-      startDeltaMs,
-      endDeltaMs
-    })
-    set((state) => ({ qaClips: upsertQaClip(state.qaClips, updated) }))
-  },
-
-  resolveQaClip: (clip) =>
-    set((state) => {
-      const key = clip.bucket === 'hook' ? 'hooks' : clip.bucket === 'meat' ? 'meats' : 'ctas'
-      const accepted: Clip = {
-        id: uuidv4(),
-        path: clip.path,
-        name: clip.label,
-        duration: clip.duration
-      }
-      // Guard against double-adding if this clip path is already in the bucket.
-      const already = state[key].some((c) => c.path === clip.path)
-      return {
-        [key]: already ? state[key] : [...state[key], accepted],
-        qaClips: state.qaClips.filter((c) => qaKey(c) !== qaKey(clip))
-      }
-    }),
-
-  setAgentReviewPrompt: (prompt) => set({ agentReviewPrompt: prompt }),
-
-  respondToReview: (response) => {
-    const prompt = get().agentReviewPrompt
-    if (!prompt) return
-    window.api.agent.respondToReview(prompt.reviewId, response)
-    set({ agentReviewPrompt: null })
-  },
 
   addClips: (bucket, clips) =>
     set((state) => ({
@@ -594,11 +470,7 @@ export const useStore = create<AppState>((set, get) => ({
         captionOffsetMs: project.captionOffsetMs || 0,
         renderProgress: [],
         isRendering: false,
-        errorLog: [],
-        agentRunning: false,
-        agentEvents: [],
-        agentReviewPrompt: null,
-        qaClips: []
+        errorLog: []
       })
       return { ok: true, missingCount }
     } catch {
@@ -615,10 +487,6 @@ export const useStore = create<AppState>((set, get) => ({
       mediaOverlays: { meat: null, cta: null },
       renderProgress: [],
       isRendering: false,
-      errorLog: [],
-      agentRunning: false,
-      agentEvents: [],
-      agentReviewPrompt: null,
-      qaClips: []
+      errorLog: []
     })
 }))

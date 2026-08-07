@@ -34,17 +34,6 @@ interface ClipQaResult {
   trailingLeak: QaLeak | null
 }
 
-interface QaRecutParams {
-  clipPath: string
-  sourcePath: string
-  sourceStart: number
-  sourceEnd: number
-  bucket: BucketType
-  label: string
-  startDeltaMs: number
-  endDeltaMs: number
-  model?: string
-}
 type ElementType = 'caption' | 'hook_text' | 'upper_third' | 'middle' | 'lower_third' | 'progress_bar' | 'logo' | 'comment_overlay' | 'full_frame'
 
 interface SafeZoneRect {
@@ -139,26 +128,6 @@ interface CaptionStyleOptions {
   animation: 'karaoke-fill' | 'word-pop' | 'fade-in' | 'glow'
 }
 
-type AgentUiEvent = Record<string, unknown> & {
-  type?: string
-  runId?: string
-  error?: string
-  diagnostics?: {
-    name?: string
-    message: string
-    stack?: string
-    provider?: string
-    statusCode?: number
-    cause?: string
-  }
-}
-
-interface AgentStartOptions {
-  sourcePath: string
-  provider?: 'google' | 'xiaomi'
-  model?: string
-  apiKey?: string
-}
 
 interface Api {
   openFiles: () => Promise<string[]>
@@ -211,13 +180,6 @@ interface Api {
   renderBatch: (jobs: RenderJob[]) => Promise<RenderProgress[]>
   cancelRender: (batchId?: string) => Promise<boolean>
   onRenderProgress: (callback: (progress: RenderProgress[]) => void) => () => void
-  agent: {
-    start: (opts: AgentStartOptions) => Promise<{ runId: string }>
-    cancel: (runId: string) => Promise<void>
-    respondToReview: (reviewId: string, response: { approved: boolean; edits?: unknown }) => Promise<void>
-    qaRecut: (params: QaRecutParams) => Promise<ClipQaResult>
-    onEvent: (cb: (evt: AgentUiEvent) => void) => () => void
-  }
   qa: {
     runBoundaryQA: (params: {
       sourcePath: string
@@ -243,16 +205,11 @@ interface Api {
       model?: string
     }) => Promise<ClipQaResult>
   }
-  agentBridge: {
+  qaBridge: {
     onTranscribeRequest: (cb: (req: { id: string; payload: { path: string; model?: string } }) => void) => () => void
     onTranscribeCancel: (cb: (req: { id: string }) => void) => () => void
     replyTranscribe: (id: string, result: { words: Array<{ text: string; start: number; end: number }>; full?: string; speechIntervals?: Array<{ start: number; end: number }> }) => void
     replyTranscribeError: (id: string, error: string) => void
-    onStoreSnapshotRequest: (cb: (req: { id: string; payload: unknown }) => void) => () => void
-    replyStoreSnapshot: (id: string, result: unknown) => void
-    onApplyAction: (cb: (action: { runId?: string; type: string; payload: unknown }) => void) => () => void
-    onStartRender: (cb: (request: { jobId: string }) => void) => () => void
-    sendRenderProgress: (progress: RenderProgress[]) => void
   }
 }
 

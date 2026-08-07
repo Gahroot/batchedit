@@ -325,18 +325,6 @@ describe('Zustand store', () => {
     })
   })
 
-  // -------------------------------------------------------------------------
-  // Agent events
-  // -------------------------------------------------------------------------
-  describe('appendAgentEvent', () => {
-    it('stops agent running state when an agent_failed event arrives', () => {
-      useStore.getState().appendAgentEvent({ type: 'agent_started', runId: 'run-1' })
-      useStore.getState().appendAgentEvent({ type: 'agent_failed', error: 'boom' })
-
-      expect(useStore.getState().agentRunning).toBe(false)
-      expect(useStore.getState().agentEvents).toHaveLength(2)
-    })
-  })
 
   // -------------------------------------------------------------------------
   // reset

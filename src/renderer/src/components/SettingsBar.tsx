@@ -1,6 +1,5 @@
 import { useStore, RESOLUTIONS } from '../store'
-import { AGENT_MODELS, getAgentModel } from '../agent-models'
-import { Settings, Monitor, FolderOpen, Key, ExternalLink, Bot } from 'lucide-react'
+import { Settings, Monitor, FolderOpen, Key, ExternalLink } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -17,17 +16,6 @@ export function SettingsBar() {
   const setOutputDirectory = useStore((s) => s.setOutputDirectory)
   const geminiApiKey = useStore((s) => s.geminiApiKey)
   const setGeminiApiKey = useStore((s) => s.setGeminiApiKey)
-  const xiaomiApiKey = useStore((s) => s.xiaomiApiKey)
-  const setXiaomiApiKey = useStore((s) => s.setXiaomiApiKey)
-  const agentModelId = useStore((s) => s.agentModelId)
-  const setAgentModelId = useStore((s) => s.setAgentModelId)
-
-  const selectedModel = getAgentModel(agentModelId)
-  const usesXiaomi = selectedModel.keyKind === 'xiaomi'
-  const keyValue = usesXiaomi ? xiaomiApiKey : geminiApiKey
-  const setKeyValue = usesXiaomi ? setXiaomiApiKey : setGeminiApiKey
-  const keyPlaceholder = usesXiaomi ? 'Xiaomi MiMo API Key' : 'Gemini API Key'
-  const keyUrl = usesXiaomi ? 'https://platform.xiaomimimo.com/' : 'https://aistudio.google.com/apikey'
 
   const handleChooseOutput = async () => {
     const dir = await window.api.openDirectory()
@@ -74,34 +62,21 @@ export function SettingsBar() {
         </Button>
       </div>
 
-      {/* Agent model picker + matching API key */}
+      {/* Gemini is used only for optional hook-text generation. */}
       <div className="flex items-center gap-2 ml-auto">
-        <Bot className="w-3.5 h-3.5 text-muted-foreground" />
-        <Select value={agentModelId} onValueChange={setAgentModelId}>
-          <SelectTrigger className="h-7 w-auto text-xs gap-1 px-2">
-            <SelectValue placeholder="Agent model" />
-          </SelectTrigger>
-          <SelectContent>
-            {AGENT_MODELS.map((model) => (
-              <SelectItem key={model.id} value={model.id}>
-                {model.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
         <Key className="w-3.5 h-3.5 text-muted-foreground" />
         <Input
           type="password"
-          placeholder={keyPlaceholder}
-          value={keyValue}
-          onChange={(e) => setKeyValue(e.target.value)}
+          placeholder="Gemini API Key"
+          value={geminiApiKey}
+          onChange={(event) => setGeminiApiKey(event.target.value)}
           className="h-7 w-48 text-xs px-2"
         />
         <Button
           variant="ghost"
           size="sm"
           className="h-7 text-xs gap-1 px-2 text-muted-foreground"
-          onClick={() => window.open(keyUrl, '_blank')}
+          onClick={() => window.open('https://aistudio.google.com/apikey', '_blank')}
         >
           <ExternalLink className="w-3 h-3" />
           Get Key

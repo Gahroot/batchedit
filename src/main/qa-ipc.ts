@@ -1,6 +1,7 @@
 import { ipcMain, type BrowserWindow } from 'electron'
 import { z } from 'zod'
 import { runBoundaryQA, manualRecutClip } from './qa-pipeline'
+import { setupQaRendererRpc } from './qa-renderer-rpc'
 
 // ---------------------------------------------------------------------------
 // Zod schemas for IPC input validation
@@ -38,6 +39,8 @@ const recutClipSchema = z.object({
 // ---------------------------------------------------------------------------
 
 export function setupQaIpc(win: BrowserWindow): void {
+  setupQaRendererRpc()
+
   ipcMain.handle('qa:runBoundaryQA', async (_event, params: unknown) => {
     const parsed = runBoundaryQaSchema.parse(params)
     return runBoundaryQA(win, parsed.sourcePath, parsed.clips, {

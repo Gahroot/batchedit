@@ -12,20 +12,12 @@ import { Separator } from '@/components/ui/separator'
 import { Toaster } from '@/components/ui/sonner'
 import { toast } from 'sonner'
 import { NumberTicker } from '@/components/ui/number-ticker'
-import { AgentPanel } from './components/AgentPanel'
 import { FFmpegBanner } from './components/FFmpegBanner'
 import { FirstRunGuide } from './components/FirstRunGuide'
-import { AgentReviewModal } from './components/AgentReviewModal'
-import { useAgentEvents } from './hooks/useAgentEvents'
-import { useAgentRenderBridge } from './hooks/useAgentRenderBridge'
-import { useAgentStoreBridge } from './hooks/useAgentStoreBridge'
-import { useAgentTranscribeBridge } from './hooks/useAgentTranscribeBridge'
+import { useQaTranscribeBridge } from './hooks/useQaTranscribeBridge'
 
 function App() {
-  useAgentEvents()
-  useAgentRenderBridge()
-  useAgentStoreBridge()
-  useAgentTranscribeBridge()
+  useQaTranscribeBridge()
   const totalCombos = useStore((s) => s.getTotalCombinations())
   const saveProject = useStore((s) => s.saveProject)
   const loadProject = useStore((s) => s.loadProject)
@@ -125,10 +117,8 @@ function App() {
           {/* Render Panel */}
           <RenderPanel />
         </div>
-        <AgentPanel />
       </div>
 
-      <AgentReviewModal />
 
       {/* Global toast container */}
       <Toaster richColors position="bottom-right" />

@@ -6,7 +6,6 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupFFmpeg, getFFmpegReadiness } from './ffmpeg'
 import { findMissingPaths } from './fs-paths'
 import { setupRenderPipeline, clearNormalizedCache, clearTrackedTempFiles } from './render-pipeline'
-import { setupAgent } from './agent/ipc'
 import { setupQaIpc } from './qa-ipc'
 import {
   PLATFORM_SAFE_ZONES,
@@ -79,7 +78,6 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
-  setupAgent(mainWindow)
   setupQaIpc(mainWindow)
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
