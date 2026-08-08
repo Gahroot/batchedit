@@ -1,5 +1,5 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
-import type { TrimLeadingSilenceResult } from '../shared/types'
+import type { SourceFileSignaturesResult, TrimLeadingSilenceResult } from '../shared/types'
 
 type Platform = 'tiktok' | 'reels' | 'shorts' | 'universal'
 type BucketType = 'hook' | 'meat' | 'cta'
@@ -175,6 +175,7 @@ interface Api {
   chooseProjectCloseAction: (isDirty: boolean) => Promise<ProjectCloseAction>
   completeProjectClose: (shouldClose: boolean) => Promise<void>
   pathsExist: (paths: string[]) => Promise<{ missing: string[] }>
+  getSourceFileSignatures: (paths: string[]) => Promise<SourceFileSignaturesResult>
   getSafeZone: (platform: Platform) => Promise<SafeZoneRect>
   getDeadZones: (platform: Platform) => Promise<PlatformDeadZones>
   getElementPlacement: (platform: Platform, element: ElementType) => Promise<SafeZoneRect>

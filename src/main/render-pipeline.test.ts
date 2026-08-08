@@ -15,8 +15,60 @@ import {
   getTrackedTempFileCount,
   releaseTempFile,
   resolveRenderOverwriteDecision,
-  trackTempFile
+  trackTempFile,
+  validateRenderCaptionData,
+  type RenderJob
 } from './render-pipeline'
+
+describe('render caption precondition', () => {
+  const baseJob: RenderJob = {
+    id: 'job-1',
+    hookPath: '/clips/hook.mp4',
+    meatPath: '/clips/meat.mp4',
+    ctaPath: '/clips/cta.mp4',
+    outputPath: '/output/video.mp4',
+    resolution: { width: 1080, height: 1920 }
+  }
+
+  it('rejects caption data that omits any required clip transcript', () => {
+    const result = validateRenderCaptionData([
+      {
+        ...baseJob,
+        captionData: {
+          clipWordChunks: {
+            '/clips/hook.mp4': [{ text: 'hook', start: 0, end: 0.5 }],
+            '/clips/cta.mp4': [{ text: 'cta', start: 0, end: 0.5 }]
+          }
+        }
+      }
+    ])
+
+    expect(result).toEqual({
+      ok: false,
+      missingPaths: ['/clips/meat.mp4'],
+      message:
+        'Auto Captions data is incomplete. Render was not started. Missing transcripts: meat.mp4.'
+    })
+  })
+
+  it('accepts present empty transcripts and captionless jobs', () => {
+    expect(
+      validateRenderCaptionData([
+        {
+          ...baseJob,
+          captionData: {
+            clipWordChunks: {
+              '/clips/hook.mp4': [],
+              '/clips/meat.mp4': [],
+              '/clips/cta.mp4': []
+            }
+          }
+        },
+        { ...baseJob, id: 'captionless-job' }
+      ])
+    ).toEqual({ ok: true })
+  })
+})
 
 describe('render batch destinations', () => {
   it('creates a new readable directory for every render run using the injected clock', () => {

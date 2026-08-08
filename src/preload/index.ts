@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import { PROJECT_CLOSE_CHANNELS, type ProjectCloseAction } from '../shared/project-close'
-import type { TrimLeadingSilenceResult } from '../shared/types'
+import type { SourceFileSignaturesResult, TrimLeadingSilenceResult } from '../shared/types'
 
 const api = {
   // File dialogs
@@ -84,6 +84,8 @@ const api = {
 
   // Filesystem
   pathsExist: (paths: string[]) => ipcRenderer.invoke('fs:pathsExist', paths),
+  getSourceFileSignatures: (paths: string[]): Promise<SourceFileSignaturesResult> =>
+    ipcRenderer.invoke('fs:getSourceFileSignatures', paths),
 
   // Safe zones
   getSafeZone: (platform: string) => ipcRenderer.invoke('safezones:getSafeZone', platform),

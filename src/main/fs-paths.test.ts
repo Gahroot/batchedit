@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { mkdtemp, writeFile, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { findMissingPaths } from './fs-paths'
+import { findMissingPaths, getSourceFileSignatures } from './fs-paths'
 
 describe('findMissingPaths', () => {
   let dir: string
@@ -46,5 +46,15 @@ describe('findMissingPaths', () => {
 
   it('handles an empty input', async () => {
     expect(await findMissingPaths([])).toEqual([])
+  })
+
+  it('returns stable size and modification identities for transcript cache freshness', async () => {
+    const missing = join(dir, 'missing.mp4')
+    const result = await getSourceFileSignatures([existing, existing, missing])
+
+    expect(result.unavailable).toEqual([missing])
+    expect(result.signatures).toHaveLength(1)
+    expect(result.signatures[0]).toMatchObject({ path: existing, size: 4 })
+    expect(result.signatures[0]?.mtimeMs).toBeGreaterThan(0)
   })
 })

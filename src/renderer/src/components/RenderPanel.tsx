@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Play, Loader2, Captions, Crop, Scissors, Square, FolderOpen } from 'lucide-react'
-import { useStore, RenderProgress } from '../store'
+import { useStore, type Combo, type RenderProgress, type WordChunk } from '../store'
 import { getWhisperModelInfo } from '../lib/whisper-config'
 import { humanizeFfmpegError } from '../../../shared/ffmpeg-error-hints'
 import { useWhisper } from '@/hooks/useWhisper'
@@ -38,6 +38,24 @@ import {
   findKnownClipPreflightIssues,
   runRenderClipPreflight
 } from '../lib/render-preflight'
+import {
+  formatAffectedOutputsSummary,
+  formatCaptionFailureSummary,
+  getUniqueCaptionClips,
+  inspectTranscriptCache,
+  prepareCaptionTranscripts,
+  type CaptionClipFailure,
+  type CaptionPreparationResult,
+  type TranscriptCache
+} from '../lib/caption-preparation'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from '@/components/ui/dialog'
 
 type RenderJob = Parameters<Window['api']['renderBatch']>[0][number]
 
@@ -46,8 +64,65 @@ interface BatchDestination {
   revealPath: string | null
 }
 
+interface PlannedRender {
+  combo: Combo
+  outputName: string
+}
+
+interface CaptionDecision {
+  result: CaptionPreparationResult
+  failedPaths: string[]
+  affectedComboIds: string[]
+  affectedOutputNames: string[]
+  totalOutputCount: number
+}
+
+type CaptionRenderIntent =
+  | { kind: 'prepare' }
+  | {
+      kind: 'continue-without-captions'
+      approvedFailedPaths: string[]
+      approvedAffectedComboIds: string[]
+    }
+
 function buildBatchOutputPath(batchDirectory: string, outputName: string): string {
   return `${batchDirectory.replace(/[/\\]+$/, '')}/${outputName}`
+}
+
+function buildOutputName(combo: Combo, index: number, hookTexts: Record<string, string>): string {
+  const hookText = hookTexts[combo.hook.id]
+  const hookLabel =
+    hookText && hookText.trim()
+      ? hookText.trim().replace(/[<>:"/\\|?*]+/g, '').replace(/\s+/g, ' ')
+      : combo.hook.name.replace(/\.[^.]+$/, '')
+  return `${hookLabel}_${combo.meat.name.replace(/\.[^.]+$/, '')}_${combo.cta.name.replace(/\.[^.]+$/, '')}_${index + 1}.mp4`
+}
+
+function comboUsesAnyPath(combo: Combo, paths: ReadonlySet<string>): boolean {
+  return paths.has(combo.hook.path) || paths.has(combo.meat.path) || paths.has(combo.cta.path)
+}
+
+function createCaptionDecision(
+  result: CaptionPreparationResult,
+  plannedRenders: readonly PlannedRender[]
+): CaptionDecision {
+  const failedPaths = result.failures.map((failure) => failure.clip.path).sort()
+  const failedPathSet = new Set(failedPaths)
+  const affectedRenders = plannedRenders.filter(({ combo }) =>
+    comboUsesAnyPath(combo, failedPathSet)
+  )
+
+  return {
+    result,
+    failedPaths,
+    affectedComboIds: affectedRenders.map(({ combo }) => combo.id).sort(),
+    affectedOutputNames: affectedRenders.map(({ outputName }) => outputName),
+    totalOutputCount: plannedRenders.length
+  }
+}
+
+function stringArraysMatch(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
 export function RenderPanel() {
@@ -96,7 +171,9 @@ export function RenderPanel() {
   const [showProgress, setShowProgress] = useState(false)
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null)
   const [batchDestination, setBatchDestination] = useState<BatchDestination | null>(null)
+  const [captionDecision, setCaptionDecision] = useState<CaptionDecision | null>(null)
   const captionPreparationRunId = useRef(0)
+  const transcriptCache = useRef<TranscriptCache>(new Map())
 
   // Listen for render progress updates
   useEffect(() => {
@@ -126,7 +203,9 @@ export function RenderPanel() {
     if (dir) setOutputDirectory(dir)
   }
 
-  const handleRender = async (): Promise<void> => {
+  const handleRender = async (
+    captionIntent: CaptionRenderIntent = { kind: 'prepare' }
+  ): Promise<void> => {
     if (totalCombos === 0) {
       toast.error('Add at least one Hook, Meat, and CTA')
       return
@@ -184,18 +263,13 @@ export function RenderPanel() {
       }
     }
 
+    setCaptionDecision(null)
     setIsRendering(true)
     setShowProgress(true)
-    clearErrors()
-
-    // Caption transcription cache (keyed by clip path)
-    const transcriptionCache: Record<
-      string,
-      Array<{ text: string; start: number; end: number }>
-    > = {}
+    if (captionIntent.kind === 'prepare') clearErrors()
 
     // Generate all combinations
-    const combos: { id: string; hook: typeof hooks[0]; meat: typeof meats[0]; cta: typeof ctas[0] }[] = []
+    const combos: Combo[] = []
     for (const hook of hooks) {
       for (const meat of meats) {
         for (const cta of ctas) {
@@ -206,84 +280,210 @@ export function RenderPanel() {
 
     // Limit if not rendering all
     const toRender = renderCount === 'all' ? combos : combos.slice(0, renderCount)
+    const plannedRenders: PlannedRender[] = toRender.map((combo, index) => ({
+      combo,
+      outputName: buildOutputName(combo, index, hookTexts)
+    }))
+    const requiredCaptionClips = getUniqueCaptionClips(
+      toRender.flatMap((combo) => [combo.hook, combo.meat, combo.cta])
+    )
+
+    const blockForCaptionFailures = (
+      result: CaptionPreparationResult,
+      title = 'Auto Captions blocked render'
+    ): void => {
+      const decision = createCaptionDecision(result, plannedRenders)
+      for (const failure of result.failures) {
+        addError({
+          source: 'caption',
+          clipName: failure.clip.name,
+          message: failure.message
+        })
+      }
+      console.error('[Auto Captions]', {
+        operation: 'prepare-render-captions',
+        model: whisperModel,
+        outcome: 'blocked',
+        successfulClips: result.successCount,
+        totalClips: result.totalCount,
+        failedClips: result.failures.map((failure) => failure.clip.name)
+      })
+      setCaptionDecision(decision)
+      setCaptionProgress(null)
+      setShowProgress(false)
+      setIsRendering(false)
+      toast.error(title, { description: formatCaptionFailureSummary(result) })
+    }
+
+    let captionTranscripts = new Map<string, WordChunk[]>()
+    let captionlessComboIds = new Set<string>()
 
     if (autoCaptions) {
-      try {
-        let modelLoaded = true
-        const selectedModelWasReady = isModelReady && loadedModel === whisperModel
+      const getCurrentSourceSignatures = async (paths: string[]) => {
+        const signatures = await window.api.getSourceFileSignatures(paths)
+        assertCurrentPreparation()
+        return signatures
+      }
 
-        try {
+      try {
+        if (captionIntent.kind === 'prepare') {
+          const selectedModelWasReady = isModelReady && loadedModel === whisperModel
           setCaptionProgress({
             stage: 'loading-model',
             currentClip: '',
             completedClips: 0,
-            totalClips: 0
+            totalClips: requiredCaptionClips.length
           })
-          await loadModel(whisperModel)
-          assertCurrentPreparation()
-          if (!selectedModelWasReady) toast.success('Whisper model ready')
-        } catch (error) {
-          if (isWhisperCancellationError(error)) throw error
 
-          modelLoaded = false
-          const message = error instanceof Error ? error.message : String(error)
-          console.error('Whisper model loading failed:', error)
-          addError({ source: 'caption', clipName: 'Whisper Model', message })
-          setAutoCaptions(false)
-          toast.error('Whisper model failed to load — Auto Captions turned off', {
-            description: 'Rendering without captions. Re-enable Auto Captions to try again.'
-          })
-          setCaptionProgress(null)
-        }
-
-        if (modelLoaded) {
-          const allClipPaths = new Set<string>()
-          for (const combo of toRender) {
-            allClipPaths.add(combo.hook.path)
-            allClipPaths.add(combo.meat.path)
-            allClipPaths.add(combo.cta.path)
-          }
-
-          const uniquePaths = Array.from(allClipPaths).sort()
-          let completed = 0
-
-          for (const clipPath of uniquePaths) {
-            assertCurrentPreparation()
-            const clipName = clipPath.split(/[/\\]/).pop() || 'Unknown'
-            setCaptionProgress({
-              stage: 'transcribing',
-              currentClip: clipName,
-              completedClips: completed,
-              totalClips: uniquePaths.length
-            })
-
-            let wavPath: string | null = null
-            try {
-              wavPath = await window.api.extractAudio(clipPath)
+          const preparationStartedAt = Date.now()
+          const result = await prepareCaptionTranscripts({
+            clips: requiredCaptionClips,
+            model: whisperModel,
+            cache: transcriptCache.current,
+            getSourceFileSignatures: getCurrentSourceSignatures,
+            loadModel: async (model) => {
+              await loadModel(model)
               assertCurrentPreparation()
-              const audioBuffer = await window.api.readAudioBuffer(wavPath)
-              wavPath = null
-              assertCurrentPreparation()
-              const { chunks } = await transcribe(new Float32Array(audioBuffer), whisperModel)
-              assertCurrentPreparation()
-              transcriptionCache[clipPath] = chunks
-            } catch (error) {
-              if (isWhisperCancellationError(error)) throw error
-              const message = error instanceof Error ? error.message : String(error)
-              console.error(`Transcription failed for ${clipName}:`, error)
-              addError({ source: 'caption', clipName, message })
-            } finally {
-              if (wavPath) await window.api.releaseTempFile(wavPath)
+            },
+            transcribeClip: async (clip) => {
+              const clipStartedAt = Date.now()
+              let wavPath: string | null = null
+              try {
+                wavPath = await window.api.extractAudio(clip.path)
+                assertCurrentPreparation()
+                const audioBuffer = await window.api.readAudioBuffer(wavPath)
+                wavPath = null
+                assertCurrentPreparation()
+                const { chunks } = await transcribe(new Float32Array(audioBuffer), whisperModel)
+                assertCurrentPreparation()
+                console.info('[Auto Captions]', {
+                  operation: 'transcribe-clip',
+                  clipPath: clip.path,
+                  outcome: 'success',
+                  elapsedMs: Date.now() - clipStartedAt
+                })
+                return chunks
+              } catch (error) {
+                console.error('[Auto Captions]', {
+                  operation: 'transcribe-clip',
+                  clipPath: clip.path,
+                  outcome: 'error',
+                  elapsedMs: Date.now() - clipStartedAt,
+                  error: error instanceof Error ? error.message : String(error)
+                })
+                throw error
+              } finally {
+                if (wavPath !== null) {
+                  try {
+                    await window.api.releaseTempFile(wavPath)
+                  } catch (error) {
+                    console.error('[Auto Captions]', {
+                      operation: 'release-temp-audio',
+                      clipPath: clip.path,
+                      outcome: 'error',
+                      error: error instanceof Error ? error.message : String(error)
+                    })
+                  }
+                }
+              }
+            },
+            isCancellationError: isWhisperCancellationError,
+            onProgress: (progress) => {
+              setCaptionProgress({
+                stage: progress.stage,
+                currentClip: progress.currentClip,
+                completedClips: progress.successfulClips,
+                totalClips: progress.totalClips
+              })
             }
+          })
+          assertCurrentPreparation()
 
-            completed += 1
+          if (result.modelLoaded && !selectedModelWasReady) toast.success('Whisper model ready')
+          if (result.failures.length > 0) {
+            blockForCaptionFailures(result)
+            return
           }
 
-          if (completed > 0) {
-            toast.success(`Transcribed ${completed} clip${completed === 1 ? '' : 's'}`)
+          captionTranscripts = result.transcripts
+          if (result.transcribedCount > 0) {
+            toast.success(
+              `Transcribed ${result.transcribedCount} clip${result.transcribedCount === 1 ? '' : 's'}`,
+              {
+                description: `${result.successCount} of ${result.totalCount} required transcripts ready.`
+              }
+            )
+          }
+          console.info('[Auto Captions]', {
+            operation: 'prepare-render-captions',
+            model: whisperModel,
+            outcome: 'success',
+            successfulClips: result.successCount,
+            totalClips: result.totalCount,
+            elapsedMs: Date.now() - preparationStartedAt
+          })
+        } else {
+          setCaptionProgress({
+            stage: 'transcribing',
+            currentClip: 'Verifying cached transcripts',
+            completedClips: 0,
+            totalClips: requiredCaptionClips.length
+          })
+          const inspection = await inspectTranscriptCache({
+            clips: requiredCaptionClips,
+            model: whisperModel,
+            cache: transcriptCache.current,
+            getSourceFileSignatures: getCurrentSourceSignatures
+          })
+          assertCurrentPreparation()
+          captionTranscripts = inspection.transcripts
+
+          const unavailablePaths = new Set(
+            inspection.unavailableClips.map((clip) => clip.path)
+          )
+          const failures: CaptionClipFailure[] = inspection.pendingClips.map((clip) => ({
+            clip,
+            kind: 'source',
+            message: unavailablePaths.has(clip.path)
+              ? 'The source file is unavailable.'
+              : 'A source-current transcript is not available.'
+          }))
+          const currentResult: CaptionPreparationResult = {
+            transcripts: inspection.transcripts,
+            failures,
+            successCount: inspection.transcripts.size,
+            totalCount: requiredCaptionClips.length,
+            transcribedCount: 0,
+            modelLoaded: false
+          }
+
+          if (failures.length > 0) {
+            const currentDecision = createCaptionDecision(currentResult, plannedRenders)
+            const approvalStillMatches =
+              stringArraysMatch(
+                currentDecision.failedPaths,
+                captionIntent.approvedFailedPaths
+              ) &&
+              stringArraysMatch(
+                currentDecision.affectedComboIds,
+                captionIntent.approvedAffectedComboIds
+              )
+            if (!approvalStillMatches) {
+              blockForCaptionFailures(
+                currentResult,
+                'Caption sources changed — review affected outputs again'
+              )
+              return
+            }
+            captionlessComboIds = new Set(currentDecision.affectedComboIds)
+            toast.info('Continuing with captions omitted from affected outputs', {
+              description: formatAffectedOutputsSummary(
+                currentDecision.affectedOutputNames.length,
+                currentDecision.totalOutputCount
+              )
+            })
           }
         }
-        assertCurrentPreparation()
       } catch (error) {
         if (isWhisperCancellationError(error)) {
           if (captionPreparationRunId.current === preparationRunId) {
@@ -295,16 +495,53 @@ export function RenderPanel() {
         }
 
         const message = error instanceof Error ? error.message : String(error)
-        addError({ source: 'caption', clipName: 'Caption preparation', message })
-        setAutoCaptions(false)
-        setCaptionProgress(null)
-        toast.error('Caption preparation failed — rendering without captions', {
-          description: message
+        const failures: CaptionClipFailure[] = requiredCaptionClips.map((clip) => ({
+          clip,
+          kind: 'source',
+          message: `Caption preparation failed: ${message}`
+        }))
+        blockForCaptionFailures({
+          transcripts: new Map(),
+          failures,
+          successCount: 0,
+          totalCount: requiredCaptionClips.length,
+          transcribedCount: 0,
+          modelLoaded: false
         })
+        return
       }
     }
 
-    if (autoCaptions && captionPreparationRunId.current !== preparationRunId) return
+    if (autoCaptions) {
+      const missingRequiredClips = requiredCaptionClips.filter(
+        (clip) => !captionTranscripts.has(clip.path)
+      )
+      const missingPathSet = new Set(missingRequiredClips.map((clip) => clip.path))
+      const unapprovedMissingPaths = new Set(
+        plannedRenders
+          .filter(({ combo }) => comboUsesAnyPath(combo, missingPathSet))
+          .filter(({ combo }) => !captionlessComboIds.has(combo.id))
+          .flatMap(({ combo }) => [combo.hook.path, combo.meat.path, combo.cta.path])
+      )
+      const unapprovedFailures: CaptionClipFailure[] = missingRequiredClips
+        .filter((clip) => unapprovedMissingPaths.has(clip.path))
+        .map((clip) => ({
+          clip,
+          kind: 'source',
+          message: 'A required transcript is missing.'
+        }))
+      if (unapprovedFailures.length > 0) {
+        blockForCaptionFailures({
+          transcripts: captionTranscripts,
+          failures: unapprovedFailures,
+          successCount: captionTranscripts.size,
+          totalCount: requiredCaptionClips.length,
+          transcribedCount: 0,
+          modelLoaded: false
+        })
+        return
+      }
+    }
 
     let batchOutputDirectory: string
     try {
@@ -322,14 +559,10 @@ export function RenderPanel() {
 
     // Build every result path inside the directory reserved for this render run.
     const jobMap: Record<string, string> = {}
-    const jobs: RenderJob[] = toRender.map((combo, idx) => {
+    const jobs: RenderJob[] = plannedRenders.map(({ combo, outputName }) => {
       const id = uuidv4()
       jobMap[id] = combo.id
       const hookText = hookTexts[combo.hook.id]
-      const hookLabel = hookText && hookText.trim()
-        ? hookText.trim().replace(/[<>:"/\\|?*]+/g, '').replace(/\s+/g, ' ')
-        : combo.hook.name.replace(/\.[^.]+$/, '')
-      const outputName = `${hookLabel}_${combo.meat.name.replace(/\.[^.]+$/, '')}_${combo.cta.name.replace(/\.[^.]+$/, '')}_${idx + 1}.mp4`
 
       const job: RenderJob = {
         id,
@@ -358,17 +591,22 @@ export function RenderPanel() {
         if (!job.hookDurationSec) job.hookDurationSec = combo.hook.duration
       }
 
-      if (autoCaptions && Object.keys(transcriptionCache).length > 0) {
-        const { id: _id, label: _label, ...styleProps } = captionStyle
-        job.captionData = {
-          clipWordChunks: {
-            [combo.hook.path]: transcriptionCache[combo.hook.path] || [],
-            [combo.meat.path]: transcriptionCache[combo.meat.path] || [],
-            [combo.cta.path]: transcriptionCache[combo.cta.path] || []
-          },
-          captionStyle: styleProps,
-          captionPosition: templateLayout.subtitles,
-          captionOffsetMs
+      if (autoCaptions && !captionlessComboIds.has(combo.id)) {
+        const hookChunks = captionTranscripts.get(combo.hook.path)
+        const meatChunks = captionTranscripts.get(combo.meat.path)
+        const ctaChunks = captionTranscripts.get(combo.cta.path)
+        if (hookChunks !== undefined && meatChunks !== undefined && ctaChunks !== undefined) {
+          const { id: _id, label: _label, ...styleProps } = captionStyle
+          job.captionData = {
+            clipWordChunks: {
+              [combo.hook.path]: hookChunks,
+              [combo.meat.path]: meatChunks,
+              [combo.cta.path]: ctaChunks
+            },
+            captionStyle: styleProps,
+            captionPosition: templateLayout.subtitles,
+            captionOffsetMs
+          }
         }
       }
 
@@ -500,11 +738,95 @@ export function RenderPanel() {
     if (didCancel) toast.info('Canceling render...')
   }
 
+  const handleRetryFailedCaptions = (): void => {
+    setCaptionDecision(null)
+    void handleRender({ kind: 'prepare' })
+  }
+
+  const handleContinueWithoutCaptions = (): void => {
+    if (captionDecision === null) return
+    const approvedFailedPaths = [...captionDecision.failedPaths]
+    const approvedAffectedComboIds = [...captionDecision.affectedComboIds]
+    setCaptionDecision(null)
+    void handleRender({
+      kind: 'continue-without-captions',
+      approvedFailedPaths,
+      approvedAffectedComboIds
+    })
+  }
+
   // Build render count options
   const renderCountOptions = [1, 5, 10, 25, 50, 100].filter((n) => n <= totalCombos)
 
   return (
     <div className="border-t border-border bg-card px-6 py-3">
+      <Dialog
+        open={captionDecision !== null}
+        onOpenChange={(open) => {
+          if (!open) setCaptionDecision(null)
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Auto Captions need attention</DialogTitle>
+            <DialogDescription>
+              {captionDecision ? formatCaptionFailureSummary(captionDecision.result) : ''}
+            </DialogDescription>
+          </DialogHeader>
+
+          {captionDecision && (
+            <div className="space-y-4 text-sm">
+              <section aria-labelledby="clips-without-transcripts">
+                <h3 id="clips-without-transcripts" className="mb-1 font-medium">
+                  Clips without transcripts
+                </h3>
+                <ul className="max-h-32 space-y-1 overflow-y-auto rounded-md border bg-muted/30 p-2">
+                  {captionDecision.result.failures.map((failure) => (
+                    <li key={failure.clip.path} className="grid gap-0.5">
+                      <span className="font-medium">{failure.clip.name}</span>
+                      <span className="text-xs text-muted-foreground">{failure.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+
+              <section aria-labelledby="outputs-without-captions">
+                <h3 id="outputs-without-captions" className="mb-1 font-medium">
+                  Affected outputs
+                </h3>
+                <p className="mb-2 text-muted-foreground">
+                  {formatAffectedOutputsSummary(
+                    captionDecision.affectedOutputNames.length,
+                    captionDecision.totalOutputCount
+                  )}{' '}
+                  Outputs with complete transcripts will keep captions. No individual video will
+                  receive partial captions.
+                </p>
+                <ul className="max-h-32 space-y-1 overflow-y-auto rounded-md border bg-muted/30 p-2 font-mono text-xs">
+                  {captionDecision.affectedOutputNames.map((outputName) => (
+                    <li key={outputName}>{outputName}</li>
+                  ))}
+                </ul>
+              </section>
+            </div>
+          )}
+
+          <DialogFooter className="gap-2 sm:justify-between">
+            <Button type="button" variant="ghost" onClick={() => setCaptionDecision(null)}>
+              Cancel
+            </Button>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row">
+              <Button type="button" variant="outline" onClick={handleRetryFailedCaptions}>
+                Retry Failed Clips
+              </Button>
+              <Button type="button" variant="destructive" onClick={handleContinueWithoutCaptions}>
+                Continue Without Captions
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Progress Display */}
       <AnimatePresence>
         {showProgress && renderProgress.length > 0 && (
@@ -674,7 +996,7 @@ export function RenderPanel() {
 
           {/* Render Button */}
           {canRender ? (
-            <ShimmerButton onClick={handleRender} className="gap-2">
+            <ShimmerButton onClick={() => void handleRender()} className="gap-2">
               <Play className="w-4 h-4" />
               Render {renderCount === 'all' ? totalCombos : renderCount} Videos
             </ShimmerButton>
@@ -693,7 +1015,7 @@ export function RenderPanel() {
               </Tooltip>
             </TooltipProvider>
           ) : (
-            <Button size="lg" onClick={handleRender} disabled={!canRender}>
+            <Button size="lg" onClick={() => void handleRender()} disabled={!canRender}>
               {isRendering ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />

@@ -19,6 +19,17 @@ export interface WordChunk {
   end: number
 }
 
+export interface SourceFileSignature {
+  path: string
+  size: number
+  mtimeMs: number
+}
+
+export interface SourceFileSignaturesResult {
+  signatures: SourceFileSignature[]
+  unavailable: string[]
+}
+
 export interface SpeechInterval {
   start: number
   end: number

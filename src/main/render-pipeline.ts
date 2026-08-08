@@ -245,6 +245,47 @@ export interface RenderJob {
   }
 }
 
+export type RenderCaptionValidationResult =
+  | { ok: true }
+  | { ok: false; missingPaths: string[]; message: string }
+
+export function validateRenderCaptionData(
+  jobs: readonly RenderJob[]
+): RenderCaptionValidationResult {
+  const missingPaths = new Set<string>()
+
+  for (const job of jobs) {
+    if (job.captionData === undefined) continue
+    const clipWordChunks: unknown = job.captionData.clipWordChunks
+    const requiredPaths = new Set([job.hookPath, job.meatPath, job.ctaPath])
+
+    if (typeof clipWordChunks !== 'object' || clipWordChunks === null) {
+      for (const clipPath of requiredPaths) missingPaths.add(clipPath)
+      continue
+    }
+
+    const chunksByPath = clipWordChunks as Record<string, unknown>
+    for (const clipPath of requiredPaths) {
+      if (
+        !Object.prototype.hasOwnProperty.call(chunksByPath, clipPath) ||
+        !Array.isArray(chunksByPath[clipPath])
+      ) {
+        missingPaths.add(clipPath)
+      }
+    }
+  }
+
+  if (missingPaths.size === 0) return { ok: true }
+
+  const sortedPaths = Array.from(missingPaths).sort()
+  const filenames = sortedPaths.map((clipPath) => basename(clipPath)).join(', ')
+  return {
+    ok: false,
+    missingPaths: sortedPaths,
+    message: `Auto Captions data is incomplete. Render was not started. Missing transcripts: ${filenames}.`
+  }
+}
+
 export type RenderProgressStatus =
   | 'queued'
   | 'normalizing'
@@ -1073,6 +1114,19 @@ export function setupRenderPipeline(options: RenderPipelineOptions = {}): void {
         return results
       }
 
+      const captionValidation = validateRenderCaptionData(jobs)
+      if (!captionValidation.ok) {
+        for (const result of results) {
+          result.percent = 100
+          result.status = 'error'
+          result.error = captionValidation.message
+          result.errorDetail = captionValidation.missingPaths.join('\n')
+        }
+        sendProgress({ force: true })
+        activeRenderBatches.delete(batchId)
+        return results
+      }
+
       const overwriteDecision = await resolveRenderOverwriteDecision(
         jobs.map((job) => job.outputPath),
         existsSync,
@@ -1206,9 +1260,9 @@ export function setupRenderPipeline(options: RenderPipelineOptions = {}): void {
             const offsetMs = cd.captionOffsetMs ?? 0
 
             const segments = [
-              { wordChunks: cd.clipWordChunks[job.hookPath] || [], offsetMs: 0 + offsetMs, durationMs: hookDurMs },
-              { wordChunks: cd.clipWordChunks[job.meatPath] || [], offsetMs: hookDurMs + offsetMs, durationMs: meatDurMs },
-              { wordChunks: cd.clipWordChunks[job.ctaPath] || [], offsetMs: hookDurMs + meatDurMs + offsetMs, durationMs: ctaDurMs }
+              { wordChunks: cd.clipWordChunks[job.hookPath], offsetMs, durationMs: hookDurMs },
+              { wordChunks: cd.clipWordChunks[job.meatPath], offsetMs: hookDurMs + offsetMs, durationMs: meatDurMs },
+              { wordChunks: cd.clipWordChunks[job.ctaPath], offsetMs: hookDurMs + meatDurMs + offsetMs, durationMs: ctaDurMs }
             ]
 
             const assContent = generateCombinedAssFile(segments, job.resolution, cd.captionStyle, cd.captionPosition)

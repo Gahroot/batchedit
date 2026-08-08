@@ -5,7 +5,7 @@ import { readFile, writeFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { PROJECT_CLOSE_CHANNELS } from '../shared/project-close'
 import { setupFFmpeg, getFFmpegReadiness } from './ffmpeg'
-import { findMissingPaths } from './fs-paths'
+import { findMissingPaths, getSourceFileSignatures } from './fs-paths'
 import { setupRenderPipeline, clearNormalizedCache, clearTrackedTempFiles } from './render-pipeline'
 import { setupProjectCloseGuard } from './project-close-guard'
 import { setupQaIpc } from './qa-ipc'
@@ -338,6 +338,11 @@ Transcript: "${transcript}"`
     if (!Array.isArray(paths)) return { missing: [] }
     const missing = await findMissingPaths(paths.filter((p) => typeof p === 'string'))
     return { missing }
+  })
+
+  ipcMain.handle('fs:getSourceFileSignatures', async (_event, paths: unknown) => {
+    if (!Array.isArray(paths)) return { signatures: [], unavailable: [] }
+    return getSourceFileSignatures(paths.filter((path): path is string => typeof path === 'string'))
   })
 
   // IPC: Load project file
