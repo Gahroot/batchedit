@@ -1,12 +1,13 @@
 import { ipcMain, app } from 'electron'
 import ffmpegModule from 'fluent-ffmpeg'
 import { ffmpeg, getVideoMetadata, extractAudio, trimVideo, trimVideoReencode, detectLeadingSilence, trimLeadingSilence, getEncoder, getSoftwareEncoder, isGpuSessionError } from './ffmpeg'
-import { join, normalize } from 'path'
+import { basename, extname, join, normalize } from 'path'
 import { writeFileSync, mkdirSync, unlinkSync, readFileSync, existsSync, statSync } from 'fs'
 import { tmpdir, cpus } from 'os'
 import { v4 as uuidv4 } from 'uuid'
 import { clampToSafeZone, getElementPlacement, CANVAS_WIDTH, CANVAS_HEIGHT, type Platform } from './safe-zones'
 import { humanizeFfmpegError } from '../shared/ffmpeg-error-hints'
+import { createManagedMediaPath } from './generated-media'
 
 function getFontsDir(): string {
   if (app.isPackaged) {
@@ -809,8 +810,9 @@ export function setupRenderPipeline(): void {
       segments: Array<{ label: string; bucket: string; startTime: number; endTime: number }>,
       outputDir: string | null
     ) => {
-      const dir = outputDir || join(tmpdir(), `batchedit-split-${uuidv4()}`)
-      mkdirSync(dir, { recursive: true })
+      const explicitOutputDirectory = outputDir && outputDir.length > 0 ? outputDir : null
+      const managedRunId = uuidv4()
+      if (explicitOutputDirectory) mkdirSync(explicitOutputDirectory, { recursive: true })
 
       const total = segments.length
       const sendProgress = (completed: number): void => {
@@ -824,8 +826,15 @@ export function setupRenderPipeline(): void {
         const safeName = seg.label.replace(/[<>:"/\\|?*]+/g, '_').replace(/\s+/g, '_')
         const count = (nameCount.get(safeName) || 0) + 1
         nameCount.set(safeName, count)
-        const fileName = count > 1 ? `${safeName}_${count}` : safeName
-        const outputPath = join(dir, `${fileName}.mp4`)
+        const fileName = `${count > 1 ? `${safeName}_${count}` : safeName}.mp4`
+        const outputPath = explicitOutputDirectory
+          ? join(explicitOutputDirectory, fileName)
+          : createManagedMediaPath({
+              userDataPath: app.getPath('userData'),
+              operation: 'smart-split',
+              fileName,
+              runId: managedRunId
+            })
         await trimVideo(videoPath, outputPath, seg.startTime, seg.endTime)
         results.push({ label: seg.label, bucket: seg.bucket, outputPath })
         sendProgress(results.length)
@@ -846,8 +855,18 @@ export function setupRenderPipeline(): void {
   ipcMain.handle(
     'ffmpeg:trimLeadingSilence',
     async (_event, videoPath: string, outputDir?: string) => {
-      const dir = outputDir || tmpdir()
-      const outPath = join(dir, `batchedit-trimmed-${uuidv4()}.mp4`)
+      const runId = uuidv4()
+      const sourceName = basename(videoPath, extname(videoPath))
+      const fileName = `${sourceName}-trimmed.mp4`
+      const outPath = outputDir && outputDir.length > 0
+        ? join(outputDir, `batchedit-trimmed-${runId}.mp4`)
+        : createManagedMediaPath({
+            userDataPath: app.getPath('userData'),
+            operation: 'silence-trim',
+            fileName,
+            runId
+          })
+      if (outputDir) mkdirSync(outputDir, { recursive: true })
       return trimLeadingSilence(videoPath, outPath)
     }
   )
@@ -862,9 +881,18 @@ export function setupRenderPipeline(): void {
       startTime: number,
       endTime: number
     ) => {
-      const dir = outputDir || tmpdir()
-      mkdirSync(dir, { recursive: true })
-      const outPath = join(dir, `batchedit-retrim-${uuidv4()}.mp4`)
+      const runId = uuidv4()
+      const sourceName = basename(videoPath, extname(videoPath))
+      const fileName = `${sourceName}-edited.mp4`
+      const outPath = outputDir && outputDir.length > 0
+        ? join(outputDir, `batchedit-edited-${runId}.mp4`)
+        : createManagedMediaPath({
+            userDataPath: app.getPath('userData'),
+            operation: 'clip-editor',
+            fileName,
+            runId
+          })
+      if (outputDir) mkdirSync(outputDir, { recursive: true })
       return trimVideoReencode(videoPath, outPath, startTime, endTime)
     }
   )

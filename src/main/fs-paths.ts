@@ -4,8 +4,8 @@ import { constants } from 'fs'
 /**
  * Returns the subset of `paths` that do not exist (or are not readable) on disk.
  *
- * Used to detect clips whose source files moved/renamed since a project was
- * saved, so the renderer can flag them before a render fails on a dead path.
+ * Used to detect clips and image overlays that moved or were renamed after a
+ * project was saved, so the renderer can flag them before rendering.
  * Duplicate inputs are checked once; the returned list preserves the first
  * occurrence order of the missing paths.
  */

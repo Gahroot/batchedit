@@ -80,6 +80,10 @@ export type LoadProjectResult =
   | { ok: true; missingCount: number }
   | { ok: false; reason: 'cancelled' | 'corrupt' }
 
+export type MediaOverlayBucket = 'meat' | 'cta'
+export type MediaOverlays = Record<MediaOverlayBucket, string | null>
+export type MissingMediaOverlays = Record<MediaOverlayBucket, boolean>
+
 export type CaptionAnimation = 'karaoke-fill' | 'word-pop' | 'fade-in' | 'glow'
 
 export interface CaptionStyle {
@@ -188,8 +192,9 @@ interface AppState {
   setTargetPlatform: (platform: Platform) => void
 
   // Media overlays (proof images for meat/CTA segments)
-  mediaOverlays: { meat: string | null; cta: string | null }
-  setMediaOverlay: (bucket: 'meat' | 'cta', path: string | null) => void
+  mediaOverlays: MediaOverlays
+  missingMediaOverlays: MissingMediaOverlays
+  setMediaOverlay: (bucket: MediaOverlayBucket, path: string | null) => void
 
   // Whisper capability and model preference
   whisperDevice: WhisperDeviceState
@@ -304,6 +309,7 @@ export const useStore = create<AppState>((set, get) => ({
   setTargetPlatform: (platform) => set({ targetPlatform: platform, isDirty: true }),
   templateLayout: DEFAULT_TEMPLATE_LAYOUT,
   mediaOverlays: { meat: null, cta: null },
+  missingMediaOverlays: { meat: false, cta: false },
   whisperDevice: 'detecting',
   whisperModel: WASM_DEFAULT_WHISPER_MODEL,
   preferredWhisperModel: savedWhisperModel,
@@ -327,6 +333,7 @@ export const useStore = create<AppState>((set, get) => ({
   setMediaOverlay: (bucket, path) =>
     set((state) => ({
       mediaOverlays: { ...state.mediaOverlays, [bucket]: path },
+      missingMediaOverlays: { ...state.missingMediaOverlays, [bucket]: false },
       isDirty: true
     })),
 
@@ -403,10 +410,16 @@ export const useStore = create<AppState>((set, get) => ({
     set((state) => {
       const key = bucket === 'hook' ? 'hooks' : bucket === 'meat' ? 'meats' : 'ctas'
       return {
-        [key]: state[key].map((c) =>
-          c.id === clipId
-            ? { ...c, path: newPath, duration: newDuration, missing: false, ...(thumbnail !== undefined && { thumbnail }) }
-            : c
+        [key]: state[key].map((clip) =>
+          clip.id === clipId
+            ? {
+                ...clip,
+                path: newPath,
+                duration: newDuration,
+                missing: false,
+                ...(thumbnail !== undefined && { thumbnail })
+              }
+            : clip
         ),
         isDirty: true
       }
@@ -478,22 +491,35 @@ export const useStore = create<AppState>((set, get) => ({
       const hooks: Clip[] = project.hooks || []
       const meats: Clip[] = project.meats || []
       const ctas: Clip[] = project.ctas || []
+      const mediaOverlays: MediaOverlays = {
+        meat: typeof project.mediaOverlays?.meat === 'string' ? project.mediaOverlays.meat : null,
+        cta: typeof project.mediaOverlays?.cta === 'string' ? project.mediaOverlays.cta : null
+      }
 
-      // Flag clips whose source files moved/renamed since the project was saved
-      // so they can be relinked or removed before a render fails on a dead path.
-      const allPaths = [...hooks, ...meats, ...ctas].map((c) => c.path)
+      // Check every persisted media dependency before it can reach the render pipeline.
+      const clipPaths = [...hooks, ...meats, ...ctas].map((clip) => clip.path)
+      const overlayPaths = [mediaOverlays.meat, mediaOverlays.cta].filter(
+        (path): path is string => path !== null
+      )
+      const dependencyPaths = Array.from(new Set([...clipPaths, ...overlayPaths])).sort()
       let missingSet = new Set<string>()
       try {
-        const { missing } = await window.api.pathsExist(allPaths)
+        const { missing } = await window.api.pathsExist(dependencyPaths)
         missingSet = new Set(missing)
       } catch {
         // If the existence check fails, fall back to loading without flags.
       }
       const markMissing = (clips: Clip[]): Clip[] =>
-        clips.map((c) => ({ ...c, missing: missingSet.has(c.path) }))
-      const missingCount = [...hooks, ...meats, ...ctas].filter((c) =>
-        missingSet.has(c.path)
+        clips.map((clip) => ({ ...clip, missing: missingSet.has(clip.path) }))
+      const missingMediaOverlays: MissingMediaOverlays = {
+        meat: mediaOverlays.meat !== null && missingSet.has(mediaOverlays.meat),
+        cta: mediaOverlays.cta !== null && missingSet.has(mediaOverlays.cta)
+      }
+      const missingClipCount = [...hooks, ...meats, ...ctas].filter((clip) =>
+        missingSet.has(clip.path)
       ).length
+      const missingOverlayCount = Number(missingMediaOverlays.meat) + Number(missingMediaOverlays.cta)
+      const missingCount = missingClipCount + missingOverlayCount
 
       set({
         hooks: markMissing(hooks),
@@ -506,7 +532,8 @@ export const useStore = create<AppState>((set, get) => ({
         captionStyle: project.captionStyle || CAPTION_PRESETS['hormozi-bold'],
         templateLayout: project.templateLayout || DEFAULT_TEMPLATE_LAYOUT,
         targetPlatform: project.targetPlatform || 'universal',
-        mediaOverlays: project.mediaOverlays || { meat: null, cta: null },
+        mediaOverlays,
+        missingMediaOverlays,
         autoTrimSilence: project.autoTrimSilence ?? false,
         captionOffsetMs: project.captionOffsetMs ?? 0,
         renderProgress: [],
@@ -532,6 +559,7 @@ export const useStore = create<AppState>((set, get) => ({
       templateLayout: DEFAULT_TEMPLATE_LAYOUT,
       targetPlatform: 'universal',
       mediaOverlays: { meat: null, cta: null },
+      missingMediaOverlays: { meat: false, cta: false },
       autoTrimSilence: false,
       captionOffsetMs: 0,
       renderProgress: [],

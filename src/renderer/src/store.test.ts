@@ -508,6 +508,99 @@ describe('Zustand store', () => {
       expect(useStore.getState().hooks.map((clip) => clip.id)).toEqual(['loaded'])
     })
 
+    it('keeps app-managed generated media paths active after save and reload', async () => {
+      const generatedPath =
+        '/Users/test/Library/Application Support/BatchEdit/media/smart-split/run-1/Hook_1.mp4'
+      const projectPath = '/Users/test/Documents/campaign.batchedit'
+      let savedProjectData = ''
+      saveProjectFile.mockImplementation(async (projectData) => {
+        savedProjectData = projectData
+        return projectPath
+      })
+      useStore.getState().addClips('hook', [makeClip({ path: generatedPath })])
+
+      await useStore.getState().saveProject()
+      useStore.getState().reset()
+      loadProjectFile.mockResolvedValue({ path: projectPath, data: savedProjectData })
+
+      await expect(useStore.getState().loadProject()).resolves.toEqual({ ok: true, missingCount: 0 })
+      expect(pathsExist).toHaveBeenCalledWith([generatedPath])
+      expect(useStore.getState().hooks[0]).toMatchObject({
+        id: 'clip-1',
+        path: generatedPath,
+        missing: false
+      })
+    })
+
+    it('checks clip and image-overlay dependencies when loading a project', async () => {
+      const clipPath = '/media/missing-clip.mp4'
+      const meatOverlayPath = '/media/missing-proof.png'
+      const ctaOverlayPath = '/media/existing-proof.png'
+      pathsExist.mockResolvedValue({ missing: [clipPath, meatOverlayPath] })
+      loadProjectFile.mockResolvedValue({
+        path: '/projects/campaign.batchedit',
+        data: JSON.stringify({
+          version: 1,
+          hooks: [makeClip({ path: clipPath })],
+          meats: [],
+          ctas: [],
+          hookTexts: {},
+          mediaOverlays: { meat: meatOverlayPath, cta: ctaOverlayPath }
+        })
+      })
+
+      await expect(useStore.getState().loadProject()).resolves.toEqual({ ok: true, missingCount: 2 })
+      expect(pathsExist).toHaveBeenCalledWith([clipPath, ctaOverlayPath, meatOverlayPath].sort())
+      expect(useStore.getState().hooks[0]?.missing).toBe(true)
+      expect(useStore.getState().missingMediaOverlays).toEqual({ meat: true, cta: false })
+    })
+
+    it('relinks in place without losing project metadata or overlay association', () => {
+      const transcript = [
+        { text: 'keep', start: 0.25, end: 0.6 },
+        { text: 'timing', start: 0.65, end: 1.2 }
+      ]
+      const targetClip = makeClip({
+        id: 'target',
+        path: '/missing/original.mp4',
+        name: 'Original name',
+        duration: 4,
+        thumbnail: 'old-thumbnail',
+        transcript,
+        missing: true
+      })
+      useStore.setState({
+        hooks: [makeClip({ id: 'before' }), targetClip, makeClip({ id: 'after' })],
+        hookTexts: { target: 'Preserved hook text' },
+        mediaOverlays: { meat: '/missing/proof.png', cta: '/media/cta.png' },
+        missingMediaOverlays: { meat: true, cta: false },
+        isDirty: false
+      })
+
+      useStore
+        .getState()
+        .updateClipPath('hook', 'target', '/replacement/relinked.mp4', 7.25, 'new-thumbnail')
+      useStore.getState().setMediaOverlay('meat', '/replacement/proof.png')
+
+      const state = useStore.getState()
+      expect(state.hooks.map((clip) => clip.id)).toEqual(['before', 'target', 'after'])
+      expect(state.hooks[1]).toEqual({
+        ...targetClip,
+        path: '/replacement/relinked.mp4',
+        duration: 7.25,
+        thumbnail: 'new-thumbnail',
+        missing: false
+      })
+      expect(state.hooks[1]?.transcript).toEqual(transcript)
+      expect(state.hookTexts.target).toBe('Preserved hook text')
+      expect(state.mediaOverlays).toEqual({
+        meat: '/replacement/proof.png',
+        cta: '/media/cta.png'
+      })
+      expect(state.missingMediaOverlays).toEqual({ meat: false, cta: false })
+      expect(state.isDirty).toBe(true)
+    })
+
     it('does not mark runtime-only progress or user preferences dirty', () => {
       useStore.getState().setRenderProgress([{ jobId: 'job-1', percent: 10, status: 'rendering' }])
       useStore.getState().setCaptionProgress({

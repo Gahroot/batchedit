@@ -48,7 +48,7 @@ const api = {
     outputDir: string | null
   ) => ipcRenderer.invoke('ffmpeg:splitVideo', videoPath, segments, outputDir),
   onSplitProgress: (callback: (progress: { completed: number; total: number }) => void) => {
-    const handler = (_event: any, progress: { completed: number; total: number }) => callback(progress)
+    const handler = (_event: IpcRendererEvent, progress: { completed: number; total: number }) => callback(progress)
     ipcRenderer.on('split:progress', handler)
     return () => ipcRenderer.removeListener('split:progress', handler)
   },
@@ -97,7 +97,7 @@ const api = {
   renderBatch: (jobs: any[]) => ipcRenderer.invoke('render:batch', jobs),
   cancelRender: (batchId?: string) => ipcRenderer.invoke('render:cancel', batchId),
   onRenderProgress: (callback: (progress: any[]) => void) => {
-    const handler = (_event: any, progress: any[]) => callback(progress)
+    const handler = (_event: IpcRendererEvent, progress: any[]) => callback(progress)
     ipcRenderer.on('render:progress', handler)
     return () => ipcRenderer.removeListener('render:progress', handler)
   },

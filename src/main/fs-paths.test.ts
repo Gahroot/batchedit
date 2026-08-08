@@ -7,11 +7,14 @@ import { findMissingPaths } from './fs-paths'
 describe('findMissingPaths', () => {
   let dir: string
   let existing: string
+  let existingOverlay: string
 
   beforeAll(async () => {
     dir = await mkdtemp(join(tmpdir(), 'batchedit-fspaths-'))
     existing = join(dir, 'clip.mp4')
+    existingOverlay = join(dir, 'proof.png')
     await writeFile(existing, 'data', 'utf-8')
+    await writeFile(existingOverlay, 'image data', 'utf-8')
   })
 
   afterAll(async () => {
@@ -22,9 +25,12 @@ describe('findMissingPaths', () => {
     expect(await findMissingPaths([existing])).toEqual([])
   })
 
-  it('returns only the paths that do not exist', async () => {
-    const missing = join(dir, 'moved.mp4')
-    expect(await findMissingPaths([existing, missing])).toEqual([missing])
+  it('returns only missing clip and image-overlay dependencies', async () => {
+    const missingClip = join(dir, 'moved.mp4')
+    const missingOverlay = join(dir, 'moved-proof.png')
+    expect(
+      await findMissingPaths([existing, missingClip, existingOverlay, missingOverlay])
+    ).toEqual([missingClip, missingOverlay])
   })
 
   it('reports all missing paths when none exist', async () => {

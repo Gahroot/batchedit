@@ -496,7 +496,10 @@ export function ClipSplitter() {
       const results = await Promise.all(
         rawResults.map(async (r) => {
           try {
-            const trimResult = await window.api.trimLeadingSilence(r.outputPath)
+            const trimResult = await window.api.trimLeadingSilence(
+              r.outputPath,
+              outputDir ?? undefined
+            )
             return { ...r, outputPath: trimResult.outputPath }
           } catch {
             return r

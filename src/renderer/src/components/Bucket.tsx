@@ -1,6 +1,18 @@
 import { useCallback, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, X, Type, FileVideo, Sparkles, Loader2, Image, Pencil, AlertTriangle, Square } from 'lucide-react'
+import {
+  Plus,
+  X,
+  Type,
+  FileVideo,
+  Sparkles,
+  Loader2,
+  Image,
+  Pencil,
+  AlertTriangle,
+  Square,
+  FolderOpen
+} from 'lucide-react'
 import { useStore, BucketType, Clip } from '../store'
 import { useWhisper } from '../hooks/useWhisper'
 import { isWhisperCancellationError, WhisperCancellationError } from '../hooks/whisper-client'
@@ -176,13 +188,19 @@ export function Bucket({ type, label, color }: BucketProps) {
   const isRendering = useStore((s) => s.isRendering)
   const hookTextProgress = useStore((s) => s.hookTextProgress)
   const mediaOverlays = useStore((s) => s.mediaOverlays)
+  const missingMediaOverlays = useStore((s) => s.missingMediaOverlays)
   const setMediaOverlay = useStore((s) => s.setMediaOverlay)
+  const updateClipPath = useStore((s) => s.updateClipPath)
   const autoTrimSilence = useStore((s) => s.autoTrimSilence)
   const addError = useStore((s) => s.addError)
   const { loadProgress } = useWhisper()
   const [isDragOver, setIsDragOver] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [editingClipId, setEditingClipId] = useState<string | null>(null)
+  const [relinkingClipId, setRelinkingClipId] = useState<string | null>(null)
+  const overlayPath = type === 'hook' ? null : mediaOverlays[type]
+  const overlayMissing = type === 'hook' ? false : missingMediaOverlays[type]
+  const overlayButtonLabel = overlayMissing ? 'Relink' : overlayPath ? 'Replace' : 'Image'
 
   const processClip = useCallback(async (path: string): Promise<Clip> => {
     let finalPath = path
@@ -223,6 +241,33 @@ export function Bucket({ type, label, color }: BucketProps) {
       setIsProcessing(false)
     }
   }, [type, addClips, processClip])
+
+  const handleRelinkClip = useCallback(async (clip: Clip): Promise<void> => {
+    if (isRendering) return
+    try {
+      const filePaths = await window.api.openFiles()
+      const replacementPath = filePaths[0]
+      if (!replacementPath) return
+
+      setRelinkingClipId(clip.id)
+      const [metadata, thumbnail] = await Promise.all([
+        window.api.getMetadata(replacementPath),
+        window.api.getThumbnail(replacementPath).catch(() => undefined)
+      ])
+      if (!Number.isFinite(metadata.duration) || metadata.duration <= 0) {
+        throw new Error('The replacement video has no readable duration')
+      }
+
+      updateClipPath(type, clip.id, replacementPath, metadata.duration, thumbnail)
+      toast.success(`${clip.name} relinked`)
+    } catch (error) {
+      toast.error(`Couldn't relink ${clip.name}`, {
+        description: error instanceof Error ? error.message : String(error)
+      })
+    } finally {
+      setRelinkingClipId(null)
+    }
+  }, [isRendering, type, updateClipPath])
 
   const handlePickOverlay = useCallback(async () => {
     if (type === 'hook') return
@@ -300,7 +345,7 @@ export function Bucket({ type, label, color }: BucketProps) {
                     className="h-7 text-xs gap-1"
                   >
                     <Image className="w-3 h-3" />
-                    {mediaOverlays[type as 'meat' | 'cta'] ? 'Replace' : 'Image'}
+                    {overlayButtonLabel}
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>Overlay a proof image on this segment</TooltipContent>
@@ -329,22 +374,46 @@ export function Bucket({ type, label, color }: BucketProps) {
       )}
 
       {/* Media overlay thumbnail */}
-      {type !== 'hook' && mediaOverlays[type as 'meat' | 'cta'] && (
-        <div className="flex items-center gap-2 px-4 py-1.5 border-b border-border bg-secondary/30">
-          <img
-            src={`file://${mediaOverlays[type as 'meat' | 'cta']}`}
-            alt="overlay"
-            className="w-8 h-8 rounded object-cover shrink-0"
-          />
-          <span className="text-xs text-muted-foreground truncate flex-1">
-            {mediaOverlays[type as 'meat' | 'cta']!.split(/[/\\]/).pop()}
+      {type !== 'hook' && overlayPath && (
+        <div
+          className={cn(
+            'flex items-center gap-2 px-4 py-1.5 border-b border-border bg-secondary/30',
+            overlayMissing && 'bg-destructive/5'
+          )}
+        >
+          {overlayMissing ? (
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-destructive/10">
+              <AlertTriangle className="h-4 w-4 text-destructive" />
+            </div>
+          ) : (
+            <img
+              src={`file://${overlayPath}`}
+              alt="Segment overlay"
+              className="w-8 h-8 rounded object-cover shrink-0"
+            />
+          )}
+          <span className={cn('text-xs truncate flex-1', overlayMissing ? 'text-destructive' : 'text-muted-foreground')}>
+            {overlayPath.split(/[/\\]/).pop()}
           </span>
+          {overlayMissing && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1 text-xs"
+              onClick={handlePickOverlay}
+              disabled={isRendering}
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              Relink
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"
             className="h-6 w-6 shrink-0"
-            onClick={() => setMediaOverlay(type as 'meat' | 'cta', null)}
+            onClick={() => setMediaOverlay(type, null)}
             disabled={isRendering}
+            aria-label="Remove image overlay"
           >
             <X className="w-3.5 h-3.5" />
           </Button>
@@ -412,7 +481,9 @@ export function Bucket({ type, label, color }: BucketProps) {
                               'group flex flex-col gap-1.5 p-2.5 rounded-md bg-secondary/50 hover:bg-secondary transition-colors',
                               clip.missing && 'ring-1 ring-destructive/60 bg-destructive/5'
                             )}
-                            onDoubleClick={() => { if (!isRendering) setEditingClipId(clip.id) }}
+                            onDoubleClick={() => {
+                              if (!isRendering && !clip.missing) setEditingClipId(clip.id)
+                            }}
                           >
                             <div className="flex items-center gap-2">
                               {clip.missing && (
@@ -444,22 +515,42 @@ export function Bucket({ type, label, color }: BucketProps) {
                                 <span className="text-[10px] text-muted-foreground font-mono">
                                   {clip.duration > 0 ? `${clip.duration.toFixed(1)}s` : '---'}
                                 </span>
-                                <TooltipProvider>
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        className="h-6 w-6 opacity-60 group-hover:opacity-100 focus-visible:opacity-100"
-                                        onClick={() => setEditingClipId(clip.id)}
-                                        disabled={isRendering}
-                                      >
-                                        <Pencil className="w-3.5 h-3.5" />
-                                      </Button>
-                                    </TooltipTrigger>
-                                    <TooltipContent>Edit clip</TooltipContent>
-                                  </Tooltip>
-                                </TooltipProvider>
+                                {clip.missing ? (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-7 gap-1 px-2 text-[10px] text-destructive"
+                                    onClick={(event) => {
+                                      event.stopPropagation()
+                                      void handleRelinkClip(clip)
+                                    }}
+                                    disabled={isRendering || relinkingClipId === clip.id}
+                                  >
+                                    {relinkingClipId === clip.id ? (
+                                      <Loader2 className="h-3 w-3 animate-spin" />
+                                    ) : (
+                                      <FolderOpen className="h-3 w-3" />
+                                    )}
+                                    Relink
+                                  </Button>
+                                ) : (
+                                  <TooltipProvider>
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          variant="ghost"
+                                          size="icon"
+                                          className="h-6 w-6 opacity-60 group-hover:opacity-100 focus-visible:opacity-100"
+                                          onClick={() => setEditingClipId(clip.id)}
+                                          disabled={isRendering}
+                                        >
+                                          <Pencil className="w-3.5 h-3.5" />
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent>Edit clip</TooltipContent>
+                                    </Tooltip>
+                                  </TooltipProvider>
+                                )}
                                 <TooltipProvider>
                                   <Tooltip>
                                     <TooltipTrigger asChild>
@@ -496,11 +587,23 @@ export function Bucket({ type, label, color }: BucketProps) {
                           </div>
                             </ContextMenuTrigger>
                             <ContextMenuContent>
-                              <ContextMenuItem onSelect={() => setEditingClipId(clip.id)} disabled={isRendering}>
+                              {clip.missing && (
+                                <ContextMenuItem
+                                  onSelect={() => { void handleRelinkClip(clip) }}
+                                  disabled={isRendering || relinkingClipId === clip.id}
+                                >
+                                  <FolderOpen className="w-3.5 h-3.5 mr-2" /> Relink missing clip
+                                </ContextMenuItem>
+                              )}
+                              <ContextMenuItem
+                                onSelect={() => setEditingClipId(clip.id)}
+                                disabled={isRendering || clip.missing}
+                              >
                                 <Pencil className="w-3.5 h-3.5 mr-2" /> Edit clip
                               </ContextMenuItem>
                               <ContextMenuItem
-                                onSelect={() => window.api.showItemInFolder(clip.path)}
+                                onSelect={() => { void window.api.showItemInFolder(clip.path) }}
+                                disabled={clip.missing}
                               >
                                 <FileVideo className="w-3.5 h-3.5 mr-2" /> Reveal in folder
                               </ContextMenuItem>
