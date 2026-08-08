@@ -16,9 +16,21 @@ function makeClip(overrides: Partial<Clip> = {}): Clip {
   }
 }
 
+const saveProjectFile = vi.fn<
+  (projectData: string, activeProjectPath: string | null) => Promise<string | null>
+>()
+const loadProjectFile = vi.fn<() => Promise<{ path: string; data: string } | null>>()
+const pathsExist = vi.fn<(paths: string[]) => Promise<{ missing: string[] }>>()
+
 describe('Zustand store', () => {
   beforeEach(() => {
-    // Reset to initial state before each test
+    saveProjectFile.mockReset().mockResolvedValue(null)
+    loadProjectFile.mockReset().mockResolvedValue(null)
+    pathsExist.mockReset().mockResolvedValue({ missing: [] })
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: { saveProject: saveProjectFile, loadProject: loadProjectFile, pathsExist }
+    })
     useStore.getState().reset()
   })
 
@@ -425,22 +437,97 @@ describe('Zustand store', () => {
     })
   })
 
+  describe('project dirty state', () => {
+    it('tracks imports, trims, and configuration changes across confirmed saves', async () => {
+      const projectPath = '/tmp/campaign.batchedit'
+      saveProjectFile.mockResolvedValue(projectPath)
+
+      useStore.getState().addClips('hook', [makeClip()])
+      expect(useStore.getState()).toMatchObject({ activeProjectPath: null, isDirty: true })
+
+      await expect(useStore.getState().saveProject()).resolves.toBe(projectPath)
+      expect(saveProjectFile).toHaveBeenLastCalledWith(expect.any(String), null)
+      expect(useStore.getState()).toMatchObject({ activeProjectPath: projectPath, isDirty: false })
+
+      useStore.getState().updateClipPath('hook', 'clip-1', '/path/to/trimmed.mp4', 3.5)
+      expect(useStore.getState().isDirty).toBe(true)
+
+      await expect(useStore.getState().saveProject()).resolves.toBe(projectPath)
+      expect(saveProjectFile).toHaveBeenLastCalledWith(expect.any(String), projectPath)
+      expect(useStore.getState().isDirty).toBe(false)
+
+      useStore.getState().setResolution(RESOLUTIONS['1:1'])
+      expect(useStore.getState().isDirty).toBe(true)
+    })
+
+    it('stays dirty when save is cancelled or project I/O fails', async () => {
+      useStore.getState().addClips('hook', [makeClip()])
+      await expect(useStore.getState().saveProject()).resolves.toBeNull()
+      expect(useStore.getState()).toMatchObject({ activeProjectPath: null, isDirty: true })
+
+      saveProjectFile.mockRejectedValueOnce(new Error('disk full'))
+      await expect(useStore.getState().saveProject()).rejects.toThrow('disk full')
+      expect(useStore.getState()).toMatchObject({ activeProjectPath: null, isDirty: true })
+    })
+
+    it('keeps newer edits dirty when they occur during a confirmed save', async () => {
+      const projectPath = '/tmp/campaign.batchedit'
+      let confirmSave: (path: string | null) => void = () => {
+        throw new Error('Save resolver was not initialized')
+      }
+      saveProjectFile.mockImplementation(() => new Promise((resolve) => {
+        confirmSave = resolve
+      }))
+      useStore.getState().addClips('hook', [makeClip()])
+
+      const pendingSave = useStore.getState().saveProject()
+      useStore.getState().setHookText('clip-1', 'Newer edit')
+      confirmSave(projectPath)
+
+      await expect(pendingSave).resolves.toBe(projectPath)
+      expect(useStore.getState()).toMatchObject({ activeProjectPath: projectPath, isDirty: true })
+    })
+
+    it('sets the active path and clears dirty state only after a confirmed load', async () => {
+      useStore.getState().addClips('hook', [makeClip({ id: 'old' })])
+      loadProjectFile.mockResolvedValue({
+        path: '/tmp/loaded.batchedit',
+        data: JSON.stringify({
+          version: 1, hooks: [makeClip({ id: 'loaded' })], meats: [], ctas: [], hookTexts: {}
+        })
+      })
+
+      await expect(useStore.getState().loadProject()).resolves.toEqual({ ok: true, missingCount: 0 })
+      expect(useStore.getState()).toMatchObject({ activeProjectPath: '/tmp/loaded.batchedit', isDirty: false })
+      expect(useStore.getState().hooks.map((clip) => clip.id)).toEqual(['loaded'])
+    })
+
+    it('does not mark runtime-only progress or user preferences dirty', () => {
+      useStore.getState().setRenderProgress([{ jobId: 'job-1', percent: 10, status: 'rendering' }])
+      useStore.getState().setCaptionProgress({
+        stage: 'transcribing', currentClip: 'clip.mp4', completedClips: 0, totalClips: 1
+      })
+      useStore.getState().setGeminiApiKey('local-key')
+      expect(useStore.getState().isDirty).toBe(false)
+    })
+  })
+
   // -------------------------------------------------------------------------
   // Initial state
   // -------------------------------------------------------------------------
   describe('initial state', () => {
     it('has default 9:16 resolution', () => {
-      // reset() doesn't restore settings, so test on a fresh store import
-      // Instead, verify the RESOLUTIONS constant directly
-      const res = RESOLUTIONS['9:16']
+      const res = useStore.getState().settings.resolution
       expect(res.width).toBe(1080)
       expect(res.height).toBe(1920)
     })
 
-    it('has null output directory by default', () => {
-      // reset() doesn't restore settings; verify the store initializes with null
-      // by checking that a freshly-created store snapshot has the expected shape
-      expect(useStore.getState().settings).toHaveProperty('outputDirectory')
+    it('has no active project and no unsaved changes', () => {
+      expect(useStore.getState()).toMatchObject({
+        activeProjectPath: null,
+        isDirty: false,
+        settings: { outputDirectory: null }
+      })
     })
 
     it('is not rendering initially', () => {

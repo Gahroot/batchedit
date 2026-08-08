@@ -171,6 +171,10 @@ interface AppState {
   // Text overlays for hooks (keyed by clip ID)
   hookTexts: Record<string, string>
 
+  // Project file state
+  activeProjectPath: string | null
+  isDirty: boolean
+
   // Project settings
   settings: ProjectSettings
 
@@ -258,11 +262,46 @@ const RESOLUTIONS = {
 
 export { RESOLUTIONS }
 
+function readLocalSetting(key: string): string | null {
+  try {
+    return window.localStorage?.getItem(key) ?? null
+  } catch {
+    return null
+  }
+}
+
+function writeLocalSetting(key: string, value: string): void {
+  try {
+    window.localStorage?.setItem(key, value)
+  } catch {
+    // Settings still apply for this session when persistent storage is unavailable.
+  }
+}
+
+function serializeProject(state: AppState): string {
+  return JSON.stringify({
+    version: 1,
+    hooks: state.hooks,
+    meats: state.meats,
+    ctas: state.ctas,
+    hookTexts: state.hookTexts,
+    settings: state.settings,
+    captionStyle: state.captionStyle,
+    templateLayout: state.templateLayout,
+    targetPlatform: state.targetPlatform,
+    mediaOverlays: state.mediaOverlays,
+    autoTrimSilence: state.autoTrimSilence,
+    captionOffsetMs: state.captionOffsetMs
+  }, null, 2)
+}
+
 export const useStore = create<AppState>((set, get) => ({
   hooks: [],
   meats: [],
   ctas: [],
   hookTexts: {},
+  activeProjectPath: null,
+  isDirty: false,
   settings: {
     resolution: RESOLUTIONS['9:16'],
     outputDirectory: null
@@ -273,40 +312,41 @@ export const useStore = create<AppState>((set, get) => ({
   setJobIdToComboId: (map) => set({ jobIdToComboId: map }),
   captionProgress: null,
   captionStyle: CAPTION_PRESETS['hormozi-bold'],
-  geminiApiKey: localStorage.getItem('batchedit-gemini-key') || '',
+  geminiApiKey: readLocalSetting('batchedit-gemini-key') || '',
   hookTextProgress: null,
   targetPlatform: 'universal',
-  setTargetPlatform: (platform) => set({ targetPlatform: platform }),
+  setTargetPlatform: (platform) => set({ targetPlatform: platform, isDirty: true }),
   templateLayout: DEFAULT_TEMPLATE_LAYOUT,
   mediaOverlays: { meat: null, cta: null },
-  whisperModel: localStorage.getItem('batchedit-whisper-model') || 'onnx-community/whisper-large-v3-turbo_timestamped',
+  whisperModel: readLocalSetting('batchedit-whisper-model') || 'onnx-community/whisper-large-v3-turbo_timestamped',
   setWhisperModel: (model) => {
-    localStorage.setItem('batchedit-whisper-model', model)
+    writeLocalSetting('batchedit-whisper-model', model)
     set({ whisperModel: model })
   },
   captionOffsetMs: 0,
-  setCaptionOffsetMs: (ms) => set({ captionOffsetMs: ms }),
+  setCaptionOffsetMs: (ms) => set({ captionOffsetMs: ms, isDirty: true }),
 
   autoTrimSilence: false,
-  setAutoTrimSilence: (enabled) => set({ autoTrimSilence: enabled }),
+  setAutoTrimSilence: (enabled) => set({ autoTrimSilence: enabled, isDirty: true }),
 
   errorLog: [],
 
   setMediaOverlay: (bucket, path) =>
     set((state) => ({
-      mediaOverlays: { ...state.mediaOverlays, [bucket]: path }
+      mediaOverlays: { ...state.mediaOverlays, [bucket]: path },
+      isDirty: true
     })),
 
   setCaptionProgress: (progress) => set({ captionProgress: progress }),
 
-  setCaptionStyle: (style) => set({ captionStyle: style }),
+  setCaptionStyle: (style) => set({ captionStyle: style, isDirty: true }),
 
   setGeminiApiKey: (key) => {
-    localStorage.setItem('batchedit-gemini-key', key)
+    writeLocalSetting('batchedit-gemini-key', key)
     set({ geminiApiKey: key })
   },
   setHookTextProgress: (progress) => set({ hookTextProgress: progress }),
-  setTemplateLayout: (layout) => set({ templateLayout: layout }),
+  setTemplateLayout: (layout) => set({ templateLayout: layout, isDirty: true }),
 
   addError: (entry) =>
     set((state) => ({
@@ -324,30 +364,33 @@ export const useStore = create<AppState>((set, get) => ({
       [bucket === 'hook' ? 'hooks' : bucket === 'meat' ? 'meats' : 'ctas']: [
         ...state[bucket === 'hook' ? 'hooks' : bucket === 'meat' ? 'meats' : 'ctas'],
         ...clips
-      ]
+      ],
+      isDirty: true
     })),
 
   removeClip: (bucket, clipId) =>
     set((state) => {
       const key = bucket === 'hook' ? 'hooks' : bucket === 'meat' ? 'meats' : 'ctas'
-      return { [key]: state[key].filter((c) => c.id !== clipId) }
+      return { [key]: state[key].filter((c) => c.id !== clipId), isDirty: true }
     }),
 
   reorderClips: (bucket, clips) =>
     set(() => ({
-      [bucket === 'hook' ? 'hooks' : bucket === 'meat' ? 'meats' : 'ctas']: clips
+      [bucket === 'hook' ? 'hooks' : bucket === 'meat' ? 'meats' : 'ctas']: clips,
+      isDirty: true
     })),
 
   setHookText: (clipId, text) =>
     set((state) => ({
-      hookTexts: { ...state.hookTexts, [clipId]: text }
+      hookTexts: { ...state.hookTexts, [clipId]: text },
+      isDirty: true
     })),
 
   setClipTranscript: (clipId, transcript) =>
     set((state) => {
       const update = (clips: Clip[]) =>
         clips.map((c) => (c.id === clipId ? { ...c, transcript } : c))
-      return { hooks: update(state.hooks), meats: update(state.meats), ctas: update(state.ctas) }
+      return { hooks: update(state.hooks), meats: update(state.meats), ctas: update(state.ctas), isDirty: true }
     }),
 
   updateClipTranscriptWord: (clipId, wordIndex, newText) =>
@@ -360,7 +403,7 @@ export const useStore = create<AppState>((set, get) => ({
           )
           return { ...c, transcript }
         })
-      return { hooks: update(state.hooks), meats: update(state.meats), ctas: update(state.ctas) }
+      return { hooks: update(state.hooks), meats: update(state.meats), ctas: update(state.ctas), isDirty: true }
     }),
 
   updateClipPath: (bucket, clipId, newPath, newDuration, thumbnail) =>
@@ -371,18 +414,21 @@ export const useStore = create<AppState>((set, get) => ({
           c.id === clipId
             ? { ...c, path: newPath, duration: newDuration, missing: false, ...(thumbnail !== undefined && { thumbnail }) }
             : c
-        )
+        ),
+        isDirty: true
       }
     }),
 
   setResolution: (resolution) =>
     set((state) => ({
-      settings: { ...state.settings, resolution }
+      settings: { ...state.settings, resolution },
+      isDirty: true
     })),
 
   setOutputDirectory: (dir) =>
     set((state) => ({
-      settings: { ...state.settings, outputDirectory: dir }
+      settings: { ...state.settings, outputDirectory: dir },
+      isDirty: true
     })),
 
   setRenderProgress: (progress) => set({ renderProgress: progress }),
@@ -414,28 +460,28 @@ export const useStore = create<AppState>((set, get) => ({
 
   saveProject: async () => {
     const state = get()
-    const project = {
-      version: 1,
-      hooks: state.hooks,
-      meats: state.meats,
-      ctas: state.ctas,
-      hookTexts: state.hookTexts,
-      settings: state.settings,
-      captionStyle: state.captionStyle,
-      templateLayout: state.templateLayout,
-      targetPlatform: state.targetPlatform,
-      mediaOverlays: state.mediaOverlays,
-      autoTrimSilence: state.autoTrimSilence,
-      captionOffsetMs: state.captionOffsetMs
-    }
-    return window.api.saveProject(JSON.stringify(project, null, 2))
+    const activeProjectPath = state.activeProjectPath
+    const projectData = serializeProject(state)
+    const savedPath = await window.api.saveProject(projectData, activeProjectPath)
+    if (typeof savedPath !== 'string' || savedPath.length === 0) return null
+
+    const currentState = get()
+    if (currentState.activeProjectPath !== activeProjectPath) return null
+    set({
+      activeProjectPath: savedPath,
+      isDirty: serializeProject(currentState) !== projectData
+    })
+    return savedPath
   },
 
   loadProject: async () => {
-    const data = await window.api.loadProject()
-    if (!data) return { ok: false, reason: 'cancelled' }
+    const loadedFile = await window.api.loadProject()
+    if (!loadedFile) return { ok: false, reason: 'cancelled' }
+    if (typeof loadedFile.path !== 'string' || typeof loadedFile.data !== 'string') {
+      return { ok: false, reason: 'corrupt' }
+    }
     try {
-      const project = JSON.parse(data)
+      const project = JSON.parse(loadedFile.data)
       const hooks: Clip[] = project.hooks || []
       const meats: Clip[] = project.meats || []
       const ctas: Clip[] = project.ctas || []
@@ -461,13 +507,15 @@ export const useStore = create<AppState>((set, get) => ({
         meats: markMissing(meats),
         ctas: markMissing(ctas),
         hookTexts: project.hookTexts || {},
+        activeProjectPath: loadedFile.path,
+        isDirty: false,
         settings: project.settings || { resolution: RESOLUTIONS['9:16'], outputDirectory: null },
         captionStyle: project.captionStyle || CAPTION_PRESETS['hormozi-bold'],
         templateLayout: project.templateLayout || DEFAULT_TEMPLATE_LAYOUT,
         targetPlatform: project.targetPlatform || 'universal',
         mediaOverlays: project.mediaOverlays || { meat: null, cta: null },
-        autoTrimSilence: project.autoTrimSilence || false,
-        captionOffsetMs: project.captionOffsetMs || 0,
+        autoTrimSilence: project.autoTrimSilence ?? false,
+        captionOffsetMs: project.captionOffsetMs ?? 0,
         renderProgress: [],
         isRendering: false,
         errorLog: []
@@ -484,9 +532,20 @@ export const useStore = create<AppState>((set, get) => ({
       meats: [],
       ctas: [],
       hookTexts: {},
+      activeProjectPath: null,
+      isDirty: false,
+      settings: { resolution: RESOLUTIONS['9:16'], outputDirectory: null },
+      captionStyle: CAPTION_PRESETS['hormozi-bold'],
+      templateLayout: DEFAULT_TEMPLATE_LAYOUT,
+      targetPlatform: 'universal',
       mediaOverlays: { meat: null, cta: null },
+      autoTrimSilence: false,
+      captionOffsetMs: 0,
       renderProgress: [],
       isRendering: false,
+      jobIdToComboId: {},
+      captionProgress: null,
+      hookTextProgress: null,
       errorLog: []
     })
 }))

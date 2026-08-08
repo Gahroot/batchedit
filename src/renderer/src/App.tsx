@@ -1,5 +1,7 @@
+import { useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore } from './store'
+import { handleProjectCloseRequest } from './project-close'
 import { Bucket } from './components/Bucket'
 import { RenderPanel } from './components/RenderPanel'
 import { SettingsBar } from './components/SettingsBar'
@@ -16,32 +18,66 @@ import { FFmpegBanner } from './components/FFmpegBanner'
 import { FirstRunGuide } from './components/FirstRunGuide'
 import { useQaTranscribeBridge } from './hooks/useQaTranscribeBridge'
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 function App() {
   useQaTranscribeBridge()
   const totalCombos = useStore((s) => s.getTotalCombinations())
   const saveProject = useStore((s) => s.saveProject)
   const loadProject = useStore((s) => s.loadProject)
+  const activeProjectPath = useStore((s) => s.activeProjectPath)
+  const isDirty = useStore((s) => s.isDirty)
+
+  useEffect(() => {
+    return window.api.onProjectCloseRequested(() => {
+      void handleProjectCloseRequest({
+        getState: useStore.getState,
+        chooseAction: window.api.chooseProjectCloseAction,
+        completeClose: window.api.completeProjectClose,
+        onSaved: (path, isClean) => {
+          if (isClean) toast.success(`Saved to ${path}`)
+          else toast.warning('Project saved, but newer changes are still unsaved')
+        },
+        onError: (error) => {
+          toast.error("Couldn't save project", { description: errorMessage(error) })
+        }
+      })
+    })
+  }, [])
 
   const handleSave = async (): Promise<void> => {
-    const path = await saveProject()
-    if (path) toast.success(`Saved to ${path}`)
+    try {
+      const path = await saveProject()
+      if (path) toast.success(`Saved to ${path}`)
+    } catch (error) {
+      toast.error("Couldn't save project", { description: errorMessage(error) })
+    }
   }
 
   const handleLoad = async (): Promise<void> => {
-    const result = await loadProject()
-    if (result.ok) {
-      toast.success('Project loaded')
-      if (result.missingCount > 0) {
-        const n = result.missingCount
-        toast.warning(
-          `${n} clip${n === 1 ? '' : 's'} missing — source file${n === 1 ? '' : 's'} moved or renamed`,
-          { description: 'Relink or remove the flagged clips before rendering.', duration: 10000 }
-        )
+    try {
+      const result = await loadProject()
+      if (result.ok) {
+        toast.success('Project loaded')
+        if (result.missingCount > 0) {
+          const n = result.missingCount
+          toast.warning(
+            `${n} clip${n === 1 ? '' : 's'} missing — source file${n === 1 ? '' : 's'} moved or renamed`,
+            { description: 'Relink or remove the flagged clips before rendering.', duration: 10000 }
+          )
+        }
+      } else if (result.reason === 'corrupt') {
+        toast.error("Couldn't load project file — it may be corrupt")
       }
-    } else if (result.reason === 'corrupt') {
-      toast.error("Couldn't load project file — it may be corrupt")
+    } catch (error) {
+      toast.error("Couldn't load project", { description: errorMessage(error) })
     }
   }
+
+  const projectName = activeProjectPath?.split(/[/\\]/).pop() || 'Untitled'
+  const projectStatus = isDirty ? 'Unsaved' : activeProjectPath ? 'Saved' : 'Not saved'
 
   return (
     <div className="flex flex-col h-screen overflow-hidden">
@@ -74,6 +110,19 @@ function App() {
               <span className="text-xs">Load</span>
             </Button>
           </div>
+          <output
+            aria-live="polite"
+            title={activeProjectPath || 'This project has not been saved yet'}
+            className="flex max-w-56 items-center gap-1.5 text-xs text-muted-foreground"
+          >
+            <span
+              aria-hidden="true"
+              className={`h-2 w-2 shrink-0 rounded-full ${isDirty ? 'bg-amber-400' : activeProjectPath ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`}
+            />
+            <span className={isDirty ? 'truncate text-amber-500' : 'truncate'}>
+              {projectName} · {projectStatus}
+            </span>
+          </output>
         </div>
         <div className="flex items-center gap-4">
           <TemplateEditor />

@@ -1,11 +1,13 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { app, shell, BrowserWindow, ipcMain, dialog, clipboard } from 'electron'
-import { join } from 'path'
+import { extname, isAbsolute, join } from 'path'
 import { readFile, writeFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import { PROJECT_CLOSE_CHANNELS } from '../shared/project-close'
 import { setupFFmpeg, getFFmpegReadiness } from './ffmpeg'
 import { findMissingPaths } from './fs-paths'
 import { setupRenderPipeline, clearNormalizedCache, clearTrackedTempFiles } from './render-pipeline'
+import { setupProjectCloseGuard } from './project-close-guard'
 import { setupQaIpc } from './qa-ipc'
 import {
   PLATFORM_SAFE_ZONES,
@@ -34,6 +36,18 @@ function showMainProcessError(title: string, message: string, error: unknown, sh
   })
   if (choice === 0) clipboard.writeText(detail)
   if (shouldExit) app.exit(1)
+}
+
+function logProjectIo(operation: 'save' | 'load', projectPath: string, outcome: 'success' | 'error', startedAt: number, error?: unknown): void {
+  const details = {
+    operation,
+    projectPath,
+    outcome,
+    elapsedMs: Date.now() - startedAt,
+    ...(error !== undefined && { error: error instanceof Error ? error.message : String(error) })
+  }
+  if (outcome === 'error') console.error('[Project I/O]', details)
+  else console.info('[Project I/O]', details)
 }
 
 // Show copyable error dialog for uncaught exceptions
@@ -77,6 +91,53 @@ function createWindow(): void {
     shell.openExternal(details.url)
     return { action: 'deny' }
   })
+
+  setupProjectCloseGuard(
+    {
+      sender: mainWindow.webContents,
+      onClose: (listener) => mainWindow.on('close', listener),
+      onClosed: (listener) => mainWindow.once('closed', listener),
+      sendCloseRequest: () => mainWindow.webContents.send(PROJECT_CLOSE_CHANNELS.request),
+      close: () => mainWindow.close()
+    },
+    {
+      ipc: {
+        registerChooseAction: (listener) => {
+          ipcMain.handle(PROJECT_CLOSE_CHANNELS.chooseAction, (event, isDirty: unknown) =>
+            listener(event.sender, isDirty)
+          )
+        },
+        registerComplete: (listener) => {
+          ipcMain.handle(PROJECT_CLOSE_CHANNELS.complete, (event, shouldClose: unknown) =>
+            listener(event.sender, shouldClose)
+          )
+        },
+        removeHandlers: () => {
+          ipcMain.removeHandler(PROJECT_CLOSE_CHANNELS.chooseAction)
+          ipcMain.removeHandler(PROJECT_CLOSE_CHANNELS.complete)
+        }
+      },
+      showClosePrompt: async () => {
+        const result = await dialog.showMessageBox(mainWindow, {
+          type: 'warning',
+          title: 'Unsaved Changes',
+          message: 'Do you want to save your changes before closing?',
+          detail: 'Unsaved changes will be permanently lost if you choose Discard.',
+          buttons: ['Save', 'Discard', 'Cancel'],
+          defaultId: 0,
+          cancelId: 2,
+          noLink: true
+        })
+        return result.response
+      },
+      reportError: (error) => showMainProcessError(
+        'Close Failed',
+        'BatchEdit could not confirm whether to close this project',
+        error,
+        false
+      )
+    }
+  )
 
   setupQaIpc(mainWindow)
 
@@ -245,15 +306,30 @@ Transcript: "${transcript}"`
   )
   ipcMain.handle('safezones:getAllPlatforms', () => PLATFORM_SAFE_ZONES)
 
-  // IPC: Save project file
-  ipcMain.handle('project:save', async (_event, projectData: string) => {
-    const result = await dialog.showSaveDialog({
-      filters: [{ name: 'BatchEdit Project', extensions: ['batchedit'] }],
-      defaultPath: 'project.batchedit'
-    })
-    if (result.canceled || !result.filePath) return null
-    await writeFile(result.filePath, projectData, 'utf-8')
-    return result.filePath
+  // IPC: Save project file, reusing the active path after the first confirmed save/load.
+  ipcMain.handle('project:save', async (_event, projectData: unknown, projectPath: unknown): Promise<string | null> => {
+    if (typeof projectData !== 'string') throw new TypeError('Project data must be a string')
+    let targetPath = typeof projectPath === 'string' && isAbsolute(projectPath) &&
+      extname(projectPath).toLowerCase() === '.batchedit' ? projectPath : null
+
+    if (targetPath === null) {
+      const result = await dialog.showSaveDialog({
+        filters: [{ name: 'BatchEdit Project', extensions: ['batchedit'] }],
+        defaultPath: 'project.batchedit'
+      })
+      if (result.canceled || !result.filePath) return null
+      targetPath = result.filePath
+    }
+
+    const startedAt = Date.now()
+    try {
+      await writeFile(targetPath, projectData, 'utf-8')
+      logProjectIo('save', targetPath, 'success', startedAt)
+      return targetPath
+    } catch (error) {
+      logProjectIo('save', targetPath, 'error', startedAt, error)
+      throw error
+    }
   })
 
   // IPC: Report which of the given paths are missing on disk (moved/renamed
@@ -265,14 +341,23 @@ Transcript: "${transcript}"`
   })
 
   // IPC: Load project file
-  ipcMain.handle('project:load', async () => {
+  ipcMain.handle('project:load', async (): Promise<{ path: string; data: string } | null> => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [{ name: 'BatchEdit Project', extensions: ['batchedit'] }]
     })
-    if (result.canceled || result.filePaths.length === 0) return null
-    const data = await readFile(result.filePaths[0], 'utf-8')
-    return data
+    const projectPath = result.filePaths[0]
+    if (result.canceled || projectPath === undefined) return null
+
+    const startedAt = Date.now()
+    try {
+      const data = await readFile(projectPath, 'utf-8')
+      logProjectIo('load', projectPath, 'success', startedAt)
+      return { path: projectPath, data }
+    } catch (error) {
+      logProjectIo('load', projectPath, 'error', startedAt, error)
+      throw error
+    }
   })
 
   createWindow()

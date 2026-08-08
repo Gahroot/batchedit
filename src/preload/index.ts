@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
+import { PROJECT_CLOSE_CHANNELS, type ProjectCloseAction } from '../shared/project-close'
 
 const api = {
   // File dialogs
@@ -66,9 +67,19 @@ const api = {
   generateHookText: (apiKey: string, transcript: string) =>
     ipcRenderer.invoke('ai:generateHookText', apiKey, transcript),
 
-  // Project save/load
-  saveProject: (projectData: string) => ipcRenderer.invoke('project:save', projectData),
+  // Project save/load and guarded window close
+  saveProject: (projectData: string, activeProjectPath: string | null) =>
+    ipcRenderer.invoke('project:save', projectData, activeProjectPath),
   loadProject: () => ipcRenderer.invoke('project:load'),
+  onProjectCloseRequested: (callback: () => void): (() => void) => {
+    const handler = (): void => callback()
+    ipcRenderer.on(PROJECT_CLOSE_CHANNELS.request, handler)
+    return () => ipcRenderer.removeListener(PROJECT_CLOSE_CHANNELS.request, handler)
+  },
+  chooseProjectCloseAction: (isDirty: boolean): Promise<ProjectCloseAction> =>
+    ipcRenderer.invoke(PROJECT_CLOSE_CHANNELS.chooseAction, isDirty),
+  completeProjectClose: (shouldClose: boolean): Promise<void> =>
+    ipcRenderer.invoke(PROJECT_CLOSE_CHANNELS.complete, shouldClose),
 
   // Filesystem
   pathsExist: (paths: string[]) => ipcRenderer.invoke('fs:pathsExist', paths),

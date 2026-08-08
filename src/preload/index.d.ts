@@ -3,6 +3,7 @@ import { ElectronAPI } from '@electron-toolkit/preload'
 type Platform = 'tiktok' | 'reels' | 'shorts' | 'universal'
 type BucketType = 'hook' | 'meat' | 'cta'
 type QaStatus = 'clean' | 'auto_fixed' | 'flagged'
+type ProjectCloseAction = 'save' | 'discard' | 'cancel'
 
 interface BoundaryQaReport {
   clips: ClipQaResult[]
@@ -167,8 +168,11 @@ interface Api {
   detectLeadingSilence: (videoPath: string) => Promise<number>
   trimLeadingSilence: (videoPath: string, outputDir?: string) => Promise<{ outputPath: string; trimmedSeconds: number }>
   generateHookText: (apiKey: string, transcript: string) => Promise<string>
-  saveProject: (projectData: string) => Promise<string | null>
-  loadProject: () => Promise<string | null>
+  saveProject: (projectData: string, activeProjectPath: string | null) => Promise<string | null>
+  loadProject: () => Promise<{ path: string; data: string } | null>
+  onProjectCloseRequested: (callback: () => void) => () => void
+  chooseProjectCloseAction: (isDirty: boolean) => Promise<ProjectCloseAction>
+  completeProjectClose: (shouldClose: boolean) => Promise<void>
   pathsExist: (paths: string[]) => Promise<{ missing: string[] }>
   getSafeZone: (platform: Platform) => Promise<SafeZoneRect>
   getDeadZones: (platform: Platform) => Promise<PlatformDeadZones>
