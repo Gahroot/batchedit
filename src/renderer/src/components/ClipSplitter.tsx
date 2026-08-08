@@ -23,6 +23,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { useWhisper, WhisperChunk } from '@/hooks/useWhisper'
 import { isWhisperCancellationError, WhisperCancellationError } from '@/hooks/whisper-client'
 import { detectMarkers, DetectedMarker } from '../../../shared/marker-detection'
+import type { SplitClipResult } from '../../../shared/types'
 import { useStore, BucketType, Clip, ClipQaResult, WordChunk } from '../store'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -34,6 +35,7 @@ import { WhisperModelControl } from './WhisperModelControl'
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogTrigger
@@ -49,6 +51,29 @@ import { Stepper } from '@/components/ui/stepper'
 import { Switch } from '@/components/ui/switch'
 
 type Step = 'upload' | 'transcribing' | 'review' | 'splitting' | 'qa' | 'done'
+type QaRunState = 'idle' | 'running' | 'complete' | 'failed' | 'canceled' | 'skipped'
+type SplitRunState = 'idle' | 'running' | 'complete' | 'partial'
+type ActiveStage = 'transcription' | 'split' | 'qa'
+
+interface SplitSegment {
+  label: string
+  bucket: BucketType
+  startTime: number
+  endTime: number
+}
+
+interface ActiveWork {
+  id: string
+  stage: ActiveStage
+  mediaOperationIds: Set<string>
+  cancelRequested: boolean
+}
+
+interface PushCandidate {
+  label: string
+  bucket: BucketType
+  path: string
+}
 
 const STEP_LABELS = ['Upload', 'Transcribe', 'Review', 'Split', 'QA', 'Done']
 const STEP_INDEX: Record<Step, number> = {
@@ -257,7 +282,14 @@ export function ClipSplitter() {
   const [videoDuration, setVideoDuration] = useState(0)
   const [wordChunks, setWordChunks] = useState<WhisperChunk[]>([])
   const [markers, setMarkers] = useState<DetectedMarker[]>([])
-  const [splitResults, setSplitResults] = useState<Array<{ label: string; bucket: string; outputPath: string }>>([])
+  const [splitResults, setSplitResults] = useState<SplitClipResult[]>([])
+  const [splitPlan, setSplitPlan] = useState<SplitSegment[]>([])
+  const [splitOutputDirectory, setSplitOutputDirectory] = useState<string | null>(null)
+  const [splitState, setSplitState] = useState<SplitRunState>('idle')
+  const [splitPhase, setSplitPhase] = useState<'splitting' | 'trimming'>('splitting')
+  const [qaState, setQaState] = useState<QaRunState>('idle')
+  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null)
+  const [isCanceling, setIsCanceling] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [splitProgress, setSplitProgress] = useState(0)
   const [showRawChunks, setShowRawChunks] = useState(false)
@@ -270,6 +302,7 @@ export function ClipSplitter() {
   const [alsoAddToBuckets, setAlsoAddToBuckets] = useState(true)
   // Reflects whether clips were actually added to buckets, shown on the done screen.
   const [addedToBuckets, setAddedToBuckets] = useState(false)
+  const [addedClipCount, setAddedClipCount] = useState(0)
   // When true, the pending push/save included clips still flagged for review.
   const [includedFlagged, setIncludedFlagged] = useState(false)
   // When true, the skip-confirmation panel is shown before clips are dropped.
@@ -278,21 +311,85 @@ export function ClipSplitter() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const dropRef = useRef<HTMLDivElement>(null)
   const transcriptionRunId = useRef(0)
+  const activeWorkRef = useRef<ActiveWork | null>(null)
 
   const { loadModel, transcribe, cancel, isModelLoading, loadProgress } = useWhisper()
   const addClips = useStore((s) => s.addClips)
   const whisperModel = useStore((s) => s.whisperModel)
   const whisperDevice = useStore((s) => s.whisperDevice)
 
+  const beginWork = useCallback((stage: ActiveStage): ActiveWork => {
+    const work: ActiveWork = {
+      id: uuidv4(),
+      stage,
+      mediaOperationIds: new Set<string>(),
+      cancelRequested: false
+    }
+    activeWorkRef.current = work
+    setIsCanceling(false)
+    return work
+  }, [])
+
+  const finishWork = useCallback((work: ActiveWork): void => {
+    if (activeWorkRef.current === work) {
+      activeWorkRef.current = null
+      setIsCanceling(false)
+    }
+  }, [])
+
+  const cancelActiveWork = useCallback(async (): Promise<void> => {
+    const work = activeWorkRef.current
+    if (!work || work.cancelRequested) return
+
+    work.cancelRequested = true
+    setIsCanceling(true)
+    cancel()
+
+    if (work.stage === 'transcription') {
+      transcriptionRunId.current += 1
+      setError(null)
+      setStep('upload')
+      setVideoPath(null)
+      setVideoDuration(0)
+      setRecoveryMessage(
+        'Transcription canceled. Your source video was not changed; choose it again to retry.'
+      )
+    } else if (work.stage === 'qa') {
+      setQaBusy(false)
+      setQaState('canceled')
+      setError(null)
+      setStep('review')
+      setRecoveryMessage(
+        'Boundary QA canceled. All completed split files are safe and ready to recover.'
+      )
+    }
+
+    const cancellations = Array.from(work.mediaOperationIds, (operationId) =>
+      window.api.cancelMediaOperation(operationId)
+    )
+    if (work.stage === 'qa') {
+      cancellations.push(window.api.qa.cancelBoundaryQA(work.id))
+    }
+    await Promise.allSettled(cancellations)
+  }, [cancel])
+
   // Reset state when dialog closes
   useEffect(() => {
     if (!open) {
+      activeWorkRef.current = null
       setStep('upload')
       setVideoPath(null)
       setVideoDuration(0)
       setWordChunks([])
       setMarkers([])
       setSplitResults([])
+      setSplitPlan([])
+      setSplitOutputDirectory(null)
+      setSplitState('idle')
+      setSplitPhase('splitting')
+      setQaState('idle')
+      setRecoveryMessage(null)
+      setIsCanceling(false)
       setError(null)
       setSplitProgress(0)
       setShowRawChunks(false)
@@ -303,13 +400,19 @@ export function ClipSplitter() {
       setSplitAction(null)
       setAlsoAddToBuckets(true)
       setAddedToBuckets(false)
+      setAddedClipCount(0)
       setIncludedFlagged(false)
       setConfirmingPush(false)
     }
   }, [open])
 
   const runTranscription = useCallback(
-    async (path: string, duration: number, runId: number): Promise<{
+    async (
+      path: string,
+      duration: number,
+      runId: number,
+      operationId: string
+    ): Promise<{
       chunks: WhisperChunk[]
       detectedMarkers: DetectedMarker[]
     }> => {
@@ -321,7 +424,7 @@ export function ClipSplitter() {
       try {
         await loadModel(whisperModel)
         assertCurrentRun()
-        wavPath = await window.api.extractAudio(path)
+        wavPath = await window.api.extractAudio(path, operationId)
         assertCurrentRun()
         const audioBuffer = await window.api.readAudioBuffer(wavPath)
         wavPath = null
@@ -342,47 +445,57 @@ export function ClipSplitter() {
 
   const handleFile = useCallback(
     async (filePath: string): Promise<void> => {
-      if (whisperDevice === 'detecting') return
+      if (whisperDevice === 'detecting' || activeWorkRef.current) return
 
       const runId = transcriptionRunId.current + 1
       transcriptionRunId.current = runId
+      const work = beginWork('transcription')
+      work.mediaOperationIds.add(work.id)
       setError(null)
+      setRecoveryMessage(null)
+      setVideoPath(filePath)
+      setStep('transcribing')
+      setSplitResults([])
+      setSplitPlan([])
+      setSplitState('idle')
+      setQaState('idle')
+      setQaResults([])
+
       try {
-        setVideoPath(filePath)
         const meta = await window.api.getMetadata(filePath)
         if (transcriptionRunId.current !== runId) throw new WhisperCancellationError()
         setVideoDuration(meta.duration)
-        setStep('transcribing')
-        const result = await runTranscription(filePath, meta.duration, runId)
+        const result = await runTranscription(filePath, meta.duration, runId, work.id)
         if (transcriptionRunId.current !== runId) throw new WhisperCancellationError()
         setWordChunks(result.chunks)
         setMarkers(result.detectedMarkers)
         setStep('review')
-      } catch (error) {
-        if (!isWhisperCancellationError(error) && transcriptionRunId.current === runId) {
-          setError(error instanceof Error ? error.message : String(error))
+      } catch (transcriptionError) {
+        const canceled = work.cancelRequested || isWhisperCancellationError(transcriptionError)
+        if (!canceled && transcriptionRunId.current === runId) {
+          setError(
+            transcriptionError instanceof Error
+              ? transcriptionError.message
+              : String(transcriptionError)
+          )
+          setStep('upload')
         }
-        if (transcriptionRunId.current === runId) setStep('upload')
+      } finally {
+        finishWork(work)
       }
     },
-    [runTranscription, whisperDevice]
+    [beginWork, finishWork, runTranscription, whisperDevice]
   )
-
-  const stopTranscription = useCallback((): void => {
-    transcriptionRunId.current += 1
-    cancel()
-    setError(null)
-    setStep('upload')
-    setVideoPath(null)
-    setVideoDuration(0)
-  }, [cancel])
 
   const handleOpenChange = useCallback(
     (nextOpen: boolean): void => {
-      if (!nextOpen && videoPath !== null) stopTranscription()
+      if (!nextOpen && activeWorkRef.current) {
+        void cancelActiveWork()
+        return
+      }
       setOpen(nextOpen)
     },
-    [stopTranscription, videoPath]
+    [cancelActiveWork]
   )
 
   const handleDrop = useCallback(
@@ -466,81 +579,219 @@ export function ClipSplitter() {
     [wordChunks]
   )
 
-  const handleSplit = useCallback(async (action: 'save' | 'push') => {
-    if (!videoPath || markers.length === 0) return
+  const runBoundaryQa = useCallback(
+    async (results: SplitClipResult[], segments: SplitSegment[]): Promise<void> => {
+      if (!videoPath || results.length === 0 || results.length !== segments.length) return
 
-    let outputDir: string | null = null
-    if (action === 'save') {
-      outputDir = await window.api.openDirectory()
-      if (!outputDir) return
-    }
-
-    setSplitAction(action)
-    setStep('splitting')
-    setSplitProgress(0)
-    setError(null)
-
-    const unsubscribeProgress = window.api.onSplitProgress(({ completed, total }) => {
-      setSplitProgress(total > 0 ? Math.round((completed / total) * 100) : 0)
-    })
-    try {
-      const segments = markers.map((m) => ({
-        label: m.label,
-        bucket: m.bucket,
-        startTime: m.startTime,
-        endTime: m.endTime
-      }))
-      const rawResults = await window.api.splitVideo(videoPath, segments, outputDir)
-
-      // Trim leading silence from each split clip
-      const results = await Promise.all(
-        rawResults.map(async (r) => {
-          try {
-            const trimResult = await window.api.trimLeadingSilence(
-              r.outputPath,
-              outputDir ?? undefined
-            )
-            return trimResult.outcome === 'trim-success'
-              ? { ...r, outputPath: trimResult.outputPath }
-              : r
-          } catch {
-            return r
-          }
-        })
-      )
-      setSplitResults(results)
-
-      // Transition to QA step
+      const work = beginWork('qa')
       setStep('qa')
       setQaBusy(true)
+      setQaState('running')
+      setQaResults([])
+      setApprovedClips(new Set())
+      setError(null)
+      setRecoveryMessage(null)
 
-      const clipInputs = await Promise.all(
-        results.map(async (r, i) => {
-          const meta = await window.api.getMetadata(r.outputPath)
-          return {
-            label: r.label,
-            bucket: r.bucket as BucketType,
-            path: r.outputPath,
-            sourceStart: markers[i].startTime,
-            sourceEnd: markers[i].endTime,
-            duration: meta.duration
-          }
+      try {
+        const clipInputs = []
+        for (const [index, result] of results.entries()) {
+          const segment = segments[index]
+          if (!segment) throw new Error(`Missing split plan for ${result.label}`)
+          const metadataOperationId = `${work.id}:metadata:${index}`
+          work.mediaOperationIds.add(metadataOperationId)
+          const metadata = await window.api.getMetadata(result.outputPath, metadataOperationId)
+          if (work.cancelRequested) throw new WhisperCancellationError()
+          clipInputs.push({
+            label: result.label,
+            bucket: result.bucket,
+            path: result.outputPath,
+            sourceStart: segment.startTime,
+            sourceEnd: segment.endTime,
+            duration: metadata.duration
+          })
+        }
+
+        const report = await window.api.qa.runBoundaryQA({
+          sourcePath: videoPath,
+          clips: clipInputs,
+          operationId: work.id
         })
-      )
+        if (work.cancelRequested) throw new WhisperCancellationError()
+        setQaResults(report.clips)
+        setQaState('complete')
+      } catch (qaError) {
+        if (work.cancelRequested) {
+          setQaState('canceled')
+          setError(null)
+          setRecoveryMessage(
+            'Boundary QA canceled. All completed split files are safe and ready to recover.'
+          )
+        } else {
+          setQaState('failed')
+          setError(qaError instanceof Error ? qaError.message : String(qaError))
+          setRecoveryMessage(
+            'Boundary QA failed, but every split file completed successfully. Retry QA or continue with the saved files.'
+          )
+        }
+        setStep('review')
+      } finally {
+        setQaBusy(false)
+        finishWork(work)
+      }
+    },
+    [beginWork, finishWork, videoPath]
+  )
 
-      const report = await window.api.qa.runBoundaryQA({
-        sourcePath: videoPath,
-        clips: clipInputs
+  const runSplit = useCallback(
+    async (
+      segments: SplitSegment[],
+      outputDirectory: string | null,
+      existingResults: SplitClipResult[]
+    ): Promise<void> => {
+      if (!videoPath) return
+      const remainingSegments = segments.slice(existingResults.length)
+
+      const work = beginWork('split')
+      work.mediaOperationIds.add(work.id)
+      setStep('splitting')
+      setSplitState('running')
+      setSplitPhase(remainingSegments.length > 0 ? 'splitting' : 'trimming')
+      setSplitProgress(Math.round((existingResults.length / segments.length) * 100))
+      setError(null)
+      setRecoveryMessage(null)
+
+      const unsubscribeProgress = window.api.onSplitProgress(({ completed, total }) => {
+        const completedOverall = existingResults.length + completed
+        const denominator = total > 0 ? segments.length : 0
+        setSplitProgress(
+          denominator > 0 ? Math.round((completedOverall / denominator) * 100) : 0
+        )
       })
-      setQaResults(report.clips)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      setStep('review')
-    } finally {
-      unsubscribeProgress()
-      setQaBusy(false)
-    }
-  }, [videoPath, markers])
+      let completedResultsForQa: SplitClipResult[] | null = null
+
+      try {
+        const response = remainingSegments.length > 0
+          ? await window.api.splitVideo(
+              videoPath,
+              remainingSegments,
+              outputDirectory,
+              work.id
+            )
+          : { outcome: 'completed' as const, clips: [] }
+        const rawResults = [...existingResults, ...response.clips]
+        setSplitResults(rawResults)
+
+        if (response.outcome === 'canceled' || work.cancelRequested) {
+          setSplitState(rawResults.length > 0 ? 'partial' : 'idle')
+          setRecoveryMessage(
+            rawResults.length > 0
+              ? `Split canceled after ${rawResults.length} of ${segments.length} clips. Completed files are safe; resume to finish the rest.`
+              : 'Split canceled before any files completed. Review your segments and start again.'
+          )
+          setStep('review')
+          return
+        }
+
+        setSplitPhase('trimming')
+        const trimmedResults = await Promise.all(
+          rawResults.map(async (result, index) => {
+            const trimOperationId = `${work.id}:trim:${index}`
+            work.mediaOperationIds.add(trimOperationId)
+            try {
+              const trimResult = await window.api.trimLeadingSilence(
+                result.outputPath,
+                outputDirectory ?? undefined,
+                trimOperationId
+              )
+              return trimResult.outcome === 'trim-success'
+                ? { ...result, outputPath: trimResult.outputPath }
+                : result
+            } catch {
+              return result
+            }
+          })
+        )
+        setSplitResults(trimmedResults)
+
+        if (work.cancelRequested) {
+          setSplitState('partial')
+          setRecoveryMessage(
+            `Trimming canceled. ${trimmedResults.length} split files are safe; resume to finish cleanup before QA.`
+          )
+          setStep('review')
+          return
+        }
+
+        setSplitState('complete')
+        setSplitProgress(100)
+        completedResultsForQa = trimmedResults
+      } catch (splitError) {
+        setSplitState(existingResults.length > 0 ? 'partial' : 'idle')
+        if (work.cancelRequested) {
+          setRecoveryMessage(
+            existingResults.length > 0
+              ? `Split canceled. ${existingResults.length} completed files are safe; resume when ready.`
+              : 'Split canceled before any files completed. Review your segments and start again.'
+          )
+        } else {
+          setError(splitError instanceof Error ? splitError.message : String(splitError))
+          setRecoveryMessage(
+            existingResults.length > 0
+              ? `${existingResults.length} completed split files are safe. Resume to retry the remaining clips.`
+              : null
+          )
+        }
+        setStep('review')
+      } finally {
+        unsubscribeProgress()
+        finishWork(work)
+      }
+
+      if (completedResultsForQa) {
+        await runBoundaryQa(completedResultsForQa, segments)
+      }
+    },
+    [beginWork, finishWork, runBoundaryQa, videoPath]
+  )
+
+  const handleSplit = useCallback(
+    async (action: 'save' | 'push'): Promise<void> => {
+      if (!videoPath || markers.length === 0) return
+
+      let outputDirectory: string | null = null
+      if (action === 'save') {
+        outputDirectory = await window.api.openDirectory()
+        if (!outputDirectory) return
+      }
+
+      const segments = markers.map((marker) => ({
+        label: marker.label,
+        bucket: marker.bucket,
+        startTime: marker.startTime,
+        endTime: marker.endTime
+      }))
+      setSplitAction(action)
+      setSplitPlan(segments)
+      setSplitOutputDirectory(outputDirectory)
+      setSplitResults([])
+      setQaResults([])
+      setQaState('idle')
+      setAddedToBuckets(false)
+      setAddedClipCount(0)
+      await runSplit(segments, outputDirectory, [])
+    },
+    [markers, runSplit, videoPath]
+  )
+
+  const resumeSplit = useCallback(async (): Promise<void> => {
+    if (splitPlan.length === 0) return
+    await runSplit(splitPlan, splitOutputDirectory, splitResults)
+  }, [runSplit, splitOutputDirectory, splitPlan, splitResults])
+
+  const retryBoundaryQa = useCallback(async (): Promise<void> => {
+    if (splitState !== 'complete') return
+    await runBoundaryQa(splitResults, splitPlan)
+  }, [runBoundaryQa, splitPlan, splitResults, splitState])
 
   const handleNudge = useCallback(async (clip: ClipQaResult, startDeltaMs: number, endDeltaMs: number) => {
     const updated = await window.api.qa.recutClip({
@@ -579,60 +830,84 @@ export function ClipSplitter() {
     (r) => r.status === 'clean' || r.status === 'auto_fixed' || approvedClips.has(r.originalPath)
   ).length
 
-  // Adds QA clips into their Hook/Meat/CTA buckets. When includeFlagged is true,
-  // clips still flagged for review are added too (instead of being dropped).
-  // Returns how many were added.
-  const addApprovedClipsToBuckets = useCallback(async (includeFlagged: boolean): Promise<number> => {
-    const approved = qaResults.filter(
-      (r) =>
-        includeFlagged ||
-        r.status === 'clean' ||
-        r.status === 'auto_fixed' ||
-        approvedClips.has(r.originalPath)
-    )
-    if (approved.length === 0) return 0
+  const addCandidatesToBuckets = useCallback(
+    async (candidates: PushCandidate[]): Promise<number> => {
+      if (candidates.length === 0) return 0
 
-    const bucketClips: Record<BucketType, Clip[]> = {
-      hook: [],
-      meat: [],
-      cta: []
-    }
-
-    for (const result of approved) {
-      const meta = await window.api.getMetadata(result.path)
-      let thumbnail: string | undefined
-      try {
-        thumbnail = await window.api.getThumbnail(result.path)
-      } catch {}
-
-      bucketClips[result.bucket].push({
-        id: uuidv4(),
-        path: result.path,
-        name: `${result.label}.mp4`,
-        duration: meta.duration,
-        thumbnail
-      })
-    }
-
-    for (const [bucket, clips] of Object.entries(bucketClips)) {
-      if (clips.length > 0) {
-        addClips(bucket as BucketType, clips)
+      const bucketClips: Record<BucketType, Clip[]> = {
+        hook: [],
+        meat: [],
+        cta: []
       }
-    }
 
-    return approved.length
-  }, [qaResults, approvedClips, addClips])
+      for (const candidate of candidates) {
+        const metadata = await window.api.getMetadata(candidate.path)
+        let thumbnail: string | undefined
+        try {
+          thumbnail = await window.api.getThumbnail(candidate.path)
+        } catch {}
+
+        bucketClips[candidate.bucket].push({
+          id: uuidv4(),
+          path: candidate.path,
+          name: `${candidate.label}.mp4`,
+          duration: metadata.duration,
+          ...(thumbnail === undefined ? {} : { thumbnail })
+        })
+      }
+
+      for (const bucket of ['hook', 'meat', 'cta'] as const) {
+        if (bucketClips[bucket].length > 0) addClips(bucket, bucketClips[bucket])
+      }
+      return candidates.length
+    },
+    [addClips]
+  )
+
+  const addApprovedClipsToBuckets = useCallback(
+    async (includeFlagged: boolean): Promise<number> => {
+      const approved = qaResults.filter(
+        (result) =>
+          includeFlagged ||
+          result.status === 'clean' ||
+          result.status === 'auto_fixed' ||
+          approvedClips.has(result.originalPath)
+      )
+      return addCandidatesToBuckets(
+        approved.map((result) => ({
+          label: result.label,
+          bucket: result.bucket,
+          path: result.path
+        }))
+      )
+    },
+    [addCandidatesToBuckets, approvedClips, qaResults]
+  )
+
+  const addSplitResultsToBuckets = useCallback(async (): Promise<number> => {
+    return addCandidatesToBuckets(
+      splitResults.map((result) => ({
+        label: result.label,
+        bucket: result.bucket,
+        path: result.outputPath
+      }))
+    )
+  }, [addCandidatesToBuckets, splitResults])
 
   // Performs the actual bucket push and advances to the done screen.
-  const runPush = useCallback(async (includeFlagged: boolean) => {
-    const added = await addApprovedClipsToBuckets(includeFlagged)
-    setAddedToBuckets(added > 0)
-    setIncludedFlagged(includeFlagged)
-    setConfirmingPush(false)
-    setStep('done')
-  }, [addApprovedClipsToBuckets])
+  const runPush = useCallback(
+    async (includeFlagged: boolean): Promise<void> => {
+      const added = await addApprovedClipsToBuckets(includeFlagged)
+      setAddedToBuckets(added > 0)
+      setAddedClipCount(added)
+      setIncludedFlagged(includeFlagged)
+      setConfirmingPush(false)
+      setStep('done')
+    },
+    [addApprovedClipsToBuckets]
+  )
 
-  const handleFinalPush = useCallback(async () => {
+  const handleFinalPush = useCallback(async (): Promise<void> => {
     // Don't silently drop flagged clips — ask the user first.
     if (skippedCount > 0) {
       setConfirmingPush(true)
@@ -641,7 +916,7 @@ export function ClipSplitter() {
     await runPush(false)
   }, [skippedCount, runPush])
 
-  const handleFinalSave = useCallback(async () => {
+  const handleFinalSave = useCallback(async (): Promise<void> => {
     if (alsoAddToBuckets) {
       if (skippedCount > 0) {
         setConfirmingPush(true)
@@ -651,9 +926,57 @@ export function ClipSplitter() {
       return
     }
     setAddedToBuckets(false)
+    setAddedClipCount(0)
     setIncludedFlagged(false)
     setStep('done')
   }, [alsoAddToBuckets, skippedCount, runPush])
+
+  const revealCompletedFiles = useCallback(async (): Promise<void> => {
+    const firstPath = qaState === 'complete' ? qaResults[0]?.path : splitResults[0]?.outputPath
+    if (!firstPath) return
+    try {
+      await window.api.showItemInFolder(firstPath)
+    } catch (revealError) {
+      setError(revealError instanceof Error ? revealError.message : String(revealError))
+    }
+  }, [qaResults, qaState, splitResults])
+
+  const pushCompletedFilesWithoutQa = useCallback(async (): Promise<void> => {
+    try {
+      const added = await addSplitResultsToBuckets()
+      setAddedToBuckets(added > 0)
+      setAddedClipCount(added)
+      setIncludedFlagged(false)
+      setQaState('skipped')
+      setRecoveryMessage(null)
+      setError(null)
+      setStep('done')
+    } catch (pushError) {
+      setError(pushError instanceof Error ? pushError.message : String(pushError))
+    }
+  }, [addSplitResultsToBuckets])
+
+  const continueWithoutQa = useCallback(async (): Promise<void> => {
+    const confirmed = window.confirm(
+      'Boundary QA has not completed. Continue with the split files without boundary verification?'
+    )
+    if (!confirmed) return
+
+    try {
+      const shouldAddToBuckets =
+        splitAction === 'push' || (splitAction === 'save' && alsoAddToBuckets)
+      const added = shouldAddToBuckets ? await addSplitResultsToBuckets() : 0
+      setAddedToBuckets(added > 0)
+      setAddedClipCount(added)
+      setIncludedFlagged(false)
+      setQaState('skipped')
+      setRecoveryMessage(null)
+      setError(null)
+      setStep('done')
+    } catch (continueError) {
+      setError(continueError instanceof Error ? continueError.message : String(continueError))
+    }
+  }, [addSplitResultsToBuckets, alsoAddToBuckets, splitAction])
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -669,6 +992,9 @@ export function ClipSplitter() {
             <Scissors className="w-5 h-5" />
             Clip Splitter
           </DialogTitle>
+          <DialogDescription className="sr-only">
+            Transcribe a source video, review detected segments, split the clips, and verify their boundaries.
+          </DialogDescription>
         </DialogHeader>
 
         <div className="px-2 pt-1 pb-3">
@@ -682,6 +1008,12 @@ export function ClipSplitter() {
               Dismiss
             </button>
           </div>
+        )}
+
+        {recoveryMessage && (
+          <output className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700">
+            {recoveryMessage}
+          </output>
         )}
 
         {/* Upload Step */}
@@ -736,9 +1068,18 @@ export function ClipSplitter() {
                 </>
               )}
             </div>
-            <Button variant="destructive" size="sm" onClick={stopTranscription}>
-              <Square className="w-3 h-3 fill-current" />
-              Stop transcription
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={isCanceling}
+              onClick={() => void cancelActiveWork()}
+            >
+              {isCanceling ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <Square className="w-3 h-3 fill-current" />
+              )}
+              {isCanceling ? 'Canceling…' : 'Cancel'}
             </Button>
           </div>
         )}
@@ -1013,25 +1354,85 @@ export function ClipSplitter() {
             )}
 
             {/* Action Buttons */}
-            <div className="flex items-center justify-end gap-2 pt-1">
-              <Button
-                variant="outline"
-                onClick={() => handleSplit('save')}
-                disabled={markers.length === 0}
-                className="gap-1.5"
-              >
-                <FolderOpen className="w-4 h-4" />
-                Save to Disk
-              </Button>
-              <Button
-                onClick={() => handleSplit('push')}
-                disabled={markers.length === 0}
-                className="gap-1.5"
-              >
-                <ArrowRight className="w-4 h-4" />
-                Push to Buckets
-              </Button>
-            </div>
+            {splitState === 'complete' && (qaState === 'failed' || qaState === 'canceled') ? (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+                <p className="mb-2 text-xs font-medium">Completed files: {splitResults.length}</p>
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <Button size="sm" disabled={isCanceling} onClick={() => void retryBoundaryQa()}>
+                    Retry QA
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isCanceling}
+                    onClick={() => void continueWithoutQa()}
+                  >
+                    Continue Without QA
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isCanceling}
+                    onClick={() => void revealCompletedFiles()}
+                  >
+                    <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
+                    Reveal Files
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isCanceling}
+                    onClick={() => void pushCompletedFilesWithoutQa()}
+                  >
+                    <ArrowRight className="mr-1.5 h-3.5 w-3.5" />
+                    Push to BatchEdit
+                  </Button>
+                </div>
+              </div>
+            ) : splitState === 'partial' && splitResults.length > 0 ? (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+                <p className="mb-2 text-xs font-medium">
+                  {splitResults.length} of {splitPlan.length} files completed safely
+                </p>
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <Button size="sm" disabled={isCanceling} onClick={() => void resumeSplit()}>
+                    Resume Split
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => void revealCompletedFiles()}>
+                    <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
+                    Reveal Files
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void pushCompletedFilesWithoutQa()}
+                  >
+                    <ArrowRight className="mr-1.5 h-3.5 w-3.5" />
+                    Push Completed to BatchEdit
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <Button
+                  variant="outline"
+                  onClick={() => void handleSplit('save')}
+                  disabled={markers.length === 0}
+                  className="gap-1.5"
+                >
+                  <FolderOpen className="w-4 h-4" />
+                  Save to Disk
+                </Button>
+                <Button
+                  onClick={() => void handleSplit('push')}
+                  disabled={markers.length === 0}
+                  className="gap-1.5"
+                >
+                  <ArrowRight className="w-4 h-4" />
+                  Push to BatchEdit
+                </Button>
+              </div>
+            )}
             </div>
           </div>
         )}
@@ -1042,11 +1443,24 @@ export function ClipSplitter() {
             <Loader2 className="w-10 h-10 animate-spin text-primary" />
             <div className="text-center">
               <p className="text-sm font-medium">
-                Splitting {markers.length} segment{markers.length === 1 ? '' : 's'}…
+                {isCanceling
+                  ? 'Canceling split…'
+                  : splitPhase === 'trimming'
+                    ? `Trimming ${splitPlan.length} completed clip${splitPlan.length === 1 ? '' : 's'}…`
+                    : `Splitting ${splitPlan.length} segment${splitPlan.length === 1 ? '' : 's'}…`}
               </p>
               <Progress value={splitProgress} className="w-64 mt-3" />
               <p className="text-xs text-muted-foreground mt-1">{splitProgress}%</p>
             </div>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={isCanceling}
+              onClick={() => void cancelActiveWork()}
+            >
+              {isCanceling ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : null}
+              {isCanceling ? 'Canceling…' : 'Cancel'}
+            </Button>
           </div>
         )}
 
@@ -1057,11 +1471,22 @@ export function ClipSplitter() {
               <div className="flex flex-col items-center justify-center gap-4 py-12">
                 <Loader2 className="w-10 h-10 animate-spin text-primary" />
                 <div className="text-center">
-                  <p className="text-sm font-medium">Running boundary QA...</p>
+                  <p className="text-sm font-medium">
+                    {isCanceling ? 'Canceling boundary QA…' : 'Running boundary QA...'}
+                  </p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Verifying clip edges for marker contamination
+                    Completed split files remain safe while QA checks their boundaries
                   </p>
                 </div>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  disabled={isCanceling}
+                  onClick={() => void cancelActiveWork()}
+                >
+                  {isCanceling ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : null}
+                  {isCanceling ? 'Canceling…' : 'Cancel'}
+                </Button>
               </div>
             ) : (
               <>
@@ -1136,36 +1561,36 @@ export function ClipSplitter() {
                     </div>
                   </div>
                 ) : (
-                <div className="flex items-center justify-end gap-3 pt-1">
-                  {splitAction === 'save' && (
-                    <label className="mr-auto flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
-                      <Switch
-                        checked={alsoAddToBuckets}
-                        onCheckedChange={setAlsoAddToBuckets}
-                      />
-                      Also add to buckets
-                    </label>
-                  )}
-                  {splitAction === 'push' && (
-                    <Button
-                      onClick={handleFinalPush}
-                      disabled={pushableCount === 0 && skippedCount === 0}
-                      className="gap-1.5"
-                    >
-                      <ArrowRight className="w-4 h-4" />
-                      Push to Buckets
+                  <div className="flex items-center justify-end gap-3 pt-1">
+                    {splitAction === 'save' && (
+                      <label className="mr-auto flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+                        <Switch
+                          checked={alsoAddToBuckets}
+                          onCheckedChange={setAlsoAddToBuckets}
+                        />
+                        Also add to buckets
+                      </label>
+                    )}
+                    {splitAction === 'push' && (
+                      <Button
+                        onClick={handleFinalPush}
+                        disabled={pushableCount === 0 && skippedCount === 0}
+                        className="gap-1.5"
+                      >
+                        <ArrowRight className="w-4 h-4" />
+                        Push to BatchEdit
+                      </Button>
+                    )}
+                    {splitAction === 'save' && (
+                      <Button onClick={handleFinalSave} className="gap-1.5">
+                        <CheckCircle className="w-4 h-4" />
+                        Done
+                      </Button>
+                    )}
+                    <Button variant="outline" onClick={() => setOpen(false)}>
+                      Close
                     </Button>
-                  )}
-                  {splitAction === 'save' && (
-                    <Button onClick={handleFinalSave} className="gap-1.5">
-                      <CheckCircle className="w-4 h-4" />
-                      Done
-                    </Button>
-                  )}
-                  <Button variant="outline" onClick={() => setOpen(false)}>
-                    Close
-                  </Button>
-                </div>
+                  </div>
                 )}
               </>
             )}
@@ -1180,35 +1605,54 @@ export function ClipSplitter() {
               <p className="text-sm font-medium">
                 {splitAction === 'save'
                   ? `Saved ${splitResults.length} clips to disk`
-                  : `Pushed ${includedFlagged ? qaResults.length : pushableCount} clips to buckets`}
+                  : `Pushed ${addedClipCount} clips to BatchEdit`}
               </p>
               <p className="text-xs text-muted-foreground mt-1">
-                {addedToBuckets
-                  ? splitAction === 'save'
-                    ? 'Also added to your Hook/Meat/CTA buckets — ready to use without re-importing.'
-                    : 'Added to your Hook/Meat/CTA buckets — ready to use without re-importing.'
-                  : splitAction === 'save'
-                    ? 'Files written to disk only — not added to buckets. Import them to use in the app.'
-                    : 'No clips were added to buckets.'}
+                {qaState === 'skipped'
+                  ? `Boundary QA was skipped. ${addedToBuckets ? `${addedClipCount} clips were added to your Hook/Meat/CTA buckets.` : 'The completed files remain available on disk.'}`
+                  : addedToBuckets
+                    ? splitAction === 'save'
+                      ? 'Also added to your Hook/Meat/CTA buckets — ready to use without re-importing.'
+                      : 'Added to your Hook/Meat/CTA buckets — ready to use without re-importing.'
+                    : splitAction === 'save'
+                      ? 'Files written to disk only — not added to buckets. Import them to use in the app.'
+                      : 'No clips were added to buckets.'}
               </p>
               <div className="mt-3 space-y-1">
-                {qaResults.map((r, i) => (
-                  <div key={i} className="text-xs text-muted-foreground">
-                    <span className={BUCKET_COLORS_TEXT[r.bucket]}>{r.label}</span>
-                    {' \u2192 '}
-                    {r.bucket}
-                    {r.status === 'flagged' && !approvedClips.has(r.originalPath)
-                      ? includedFlagged && addedToBuckets
-                        ? ' (flagged — review)'
-                        : ' (skipped)'
-                      : ''}
-                  </div>
-                ))}
+                {qaResults.length > 0
+                  ? qaResults.map((result) => (
+                      <div
+                        key={`${result.label}:${result.originalPath}`}
+                        className="text-xs text-muted-foreground"
+                      >
+                        <span className={BUCKET_COLORS_TEXT[result.bucket]}>{result.label}</span>
+                        {' \u2192 '}
+                        {result.bucket}
+                        {result.status === 'flagged' && !approvedClips.has(result.originalPath)
+                          ? includedFlagged && addedToBuckets
+                            ? ' (flagged — review)'
+                            : ' (skipped)'
+                          : ''}
+                      </div>
+                    ))
+                  : splitResults.map((result) => (
+                      <div key={result.outputPath} className="text-xs text-muted-foreground">
+                        <span className={BUCKET_COLORS_TEXT[result.bucket]}>{result.label}</span>
+                        {' \u2192 '}
+                        {result.bucket} (QA skipped)
+                      </div>
+                    ))}
               </div>
             </div>
-            <Button variant="outline" onClick={() => setOpen(false)}>
-              Close
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" onClick={() => void revealCompletedFiles()}>
+                <FolderOpen className="mr-1.5 h-4 w-4" />
+                Reveal Files
+              </Button>
+              <Button variant="outline" onClick={() => setOpen(false)}>
+                Close
+              </Button>
+            </div>
           </div>
         )}
       </DialogContent>

@@ -5,7 +5,8 @@ export async function recutSourceClip(
   clipPath: string,
   sourcePath: string,
   startMs: number,
-  endMs: number
+  endMs: number,
+  signal?: AbortSignal
 ): Promise<{ outputPath: string; duration: number }> {
   const extension = extname(clipPath) || '.mp4'
   const outputPath = join(
@@ -14,8 +15,8 @@ export async function recutSourceClip(
     `${basename(clipPath, extension)}-recut-${Math.round(startMs)}-${Math.round(endMs)}${extension}`
   )
   const startedAt = Date.now()
-  await trimVideoReencode(sourcePath, outputPath, startMs / 1000, endMs / 1000)
-  const metadata = await getVideoMetadata(outputPath)
+  await trimVideoReencode(sourcePath, outputPath, startMs / 1000, endMs / 1000, signal)
+  const metadata = await getVideoMetadata(outputPath, signal)
   console.info('qa_recut_clip', {
     clipPath,
     sourcePath,

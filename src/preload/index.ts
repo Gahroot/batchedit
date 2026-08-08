@@ -1,7 +1,11 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import { PROJECT_CLOSE_CHANNELS, type ProjectCloseAction } from '../shared/project-close'
-import type { SourceFileSignaturesResult, TrimLeadingSilenceResult } from '../shared/types'
+import type {
+  SourceFileSignaturesResult,
+  SplitVideoResult,
+  TrimLeadingSilenceResult
+} from '../shared/types'
 
 const api = {
   // File dialogs
@@ -16,8 +20,12 @@ const api = {
 
   // FFmpeg
   getFFmpegReadiness: () => ipcRenderer.invoke('ffmpeg:getReadiness'),
-  getMetadata: (filePath: string) => ipcRenderer.invoke('ffmpeg:getMetadata', filePath),
-  extractAudio: (videoPath: string) => ipcRenderer.invoke('ffmpeg:extractAudio', videoPath),
+  getMetadata: (filePath: string, operationId?: string) =>
+    ipcRenderer.invoke('ffmpeg:getMetadata', filePath, operationId),
+  extractAudio: (videoPath: string, operationId?: string) =>
+    ipcRenderer.invoke('ffmpeg:extractAudio', videoPath, operationId),
+  cancelMediaOperation: (operationId: string): Promise<boolean> =>
+    ipcRenderer.invoke('ffmpeg:cancelMediaOperation', operationId),
   generateAss: (
     captions: { text: string; start: number; end: number }[],
     resolution: { width: number; height: number }
@@ -46,8 +54,10 @@ const api = {
   splitVideo: (
     videoPath: string,
     segments: Array<{ label: string; bucket: string; startTime: number; endTime: number }>,
-    outputDir: string | null
-  ) => ipcRenderer.invoke('ffmpeg:splitVideo', videoPath, segments, outputDir),
+    outputDir: string | null,
+    operationId?: string
+  ): Promise<SplitVideoResult> =>
+    ipcRenderer.invoke('ffmpeg:splitVideo', videoPath, segments, outputDir, operationId),
   onSplitProgress: (callback: (progress: { completed: number; total: number }) => void) => {
     const handler = (_event: IpcRendererEvent, progress: { completed: number; total: number }) => callback(progress)
     ipcRenderer.on('split:progress', handler)
@@ -55,14 +65,30 @@ const api = {
   },
 
   // Re-encoding trim (frame-accurate)
-  trimVideoReencode: (videoPath: string, outputDir: string | null, startTime: number, endTime: number) =>
-    ipcRenderer.invoke('ffmpeg:trimVideoReencode', videoPath, outputDir, startTime, endTime),
+  trimVideoReencode: (
+    videoPath: string,
+    outputDir: string | null,
+    startTime: number,
+    endTime: number,
+    operationId?: string
+  ) => ipcRenderer.invoke(
+    'ffmpeg:trimVideoReencode',
+    videoPath,
+    outputDir,
+    startTime,
+    endTime,
+    operationId
+  ),
 
   // Silence trimming
-  detectLeadingSilence: (videoPath: string) =>
-    ipcRenderer.invoke('ffmpeg:detectLeadingSilence', videoPath),
-  trimLeadingSilence: (videoPath: string, outputDir?: string): Promise<TrimLeadingSilenceResult> =>
-    ipcRenderer.invoke('ffmpeg:trimLeadingSilence', videoPath, outputDir),
+  detectLeadingSilence: (videoPath: string, operationId?: string) =>
+    ipcRenderer.invoke('ffmpeg:detectLeadingSilence', videoPath, operationId),
+  trimLeadingSilence: (
+    videoPath: string,
+    outputDir?: string,
+    operationId?: string
+  ): Promise<TrimLeadingSilenceResult> =>
+    ipcRenderer.invoke('ffmpeg:trimLeadingSilence', videoPath, outputDir, operationId),
 
   // AI
   generateHookText: (apiKey: string, transcript: string) =>
@@ -119,7 +145,10 @@ const api = {
         duration: number
       }>
       windowMs?: number
+      operationId?: string
     }) => ipcRenderer.invoke('qa:runBoundaryQA', params),
+    cancelBoundaryQA: (operationId: string): Promise<boolean> =>
+      ipcRenderer.invoke('qa:cancelBoundaryQA', operationId),
     recutClip: (params: {
       clipPath: string
       sourcePath: string
@@ -130,6 +159,7 @@ const api = {
       startDeltaMs: number
       endDeltaMs: number
       model?: string
+      operationId?: string
     }) => ipcRenderer.invoke('qa:recutClip', params)
   },
 

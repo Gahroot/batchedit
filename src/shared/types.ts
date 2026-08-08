@@ -13,6 +13,16 @@ export type TrimLeadingSilenceResult =
       error: string
     }
 
+export interface SplitClipResult {
+  label: string
+  bucket: BucketType
+  outputPath: string
+}
+
+export type SplitVideoResult =
+  | { outcome: 'completed'; clips: SplitClipResult[] }
+  | { outcome: 'canceled'; clips: SplitClipResult[] }
+
 export interface WordChunk {
   text: string
   start: number

@@ -14,6 +14,7 @@ export function useQaTranscribeBridge(): void {
     const unsubscribeCancel = window.api.qaBridge.onTranscribeCancel(({ id }) => {
       cancelledRequestIds.add(id)
       cancel()
+      void window.api.cancelMediaOperation(id).catch(() => false)
     })
 
     const unsubscribe = window.api.qaBridge.onTranscribeRequest(async (request) => {
@@ -24,7 +25,7 @@ export function useQaTranscribeBridge(): void {
         await loadModel(model)
         if (isCancelled()) return
 
-        const wavPath = await window.api.extractAudio(request.payload.path)
+        const wavPath = await window.api.extractAudio(request.payload.path, request.id)
         if (isCancelled()) {
           await window.api.releaseTempFile(wavPath)
           return

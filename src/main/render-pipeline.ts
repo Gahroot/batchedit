@@ -1,6 +1,18 @@
 import { ipcMain, app, dialog } from 'electron'
 import ffmpegModule from 'fluent-ffmpeg'
-import { ffmpeg, getVideoMetadata, extractAudio, trimVideo, trimVideoReencode, detectLeadingSilence, trimLeadingSilence, getEncoder, getSoftwareEncoder, isGpuSessionError } from './ffmpeg'
+import {
+  ffmpeg,
+  getVideoMetadata,
+  extractAudio,
+  trimVideo,
+  trimVideoReencode,
+  detectLeadingSilence,
+  trimLeadingSilence,
+  getEncoder,
+  getSoftwareEncoder,
+  isGpuSessionError,
+  isMediaOperationCanceled
+} from './ffmpeg'
 import { basename, dirname, extname, join, normalize } from 'path'
 import { writeFileSync, mkdirSync, unlinkSync, readFileSync, existsSync, statSync } from 'fs'
 import { tmpdir, cpus } from 'os'
@@ -9,6 +21,7 @@ import { clampToSafeZone, getElementPlacement, CANVAS_WIDTH, CANVAS_HEIGHT, type
 import { humanizeFfmpegError } from '../shared/ffmpeg-error-hints'
 import { createManagedMediaPath } from './generated-media'
 import { captureTrimLeadingSilenceResult } from './trim-silence-result'
+import type { SplitClipResult, SplitVideoResult } from '../shared/types'
 
 function getFontsDir(): string {
   if (app.isPackaged) {
@@ -881,24 +894,64 @@ function getSlowConcurrency(): number {
 export function setupRenderPipeline(options: RenderPipelineOptions = {}): void {
   const clock = options.clock ?? SYSTEM_CLOCK
   const confirmOverwrite = options.confirmOverwrite ?? confirmRenderOverwrite
+  const activeMediaOperations = new Map<string, AbortController>()
+  type MediaOperationScope = { signal?: AbortSignal; finish: () => void }
+
+  const createMediaOperation = (operationId: unknown): MediaOperationScope => {
+    if (operationId === undefined) return { finish: () => {} }
+    if (typeof operationId !== 'string' || operationId.trim().length === 0) {
+      throw new Error('A valid media operation ID is required')
+    }
+    if (activeMediaOperations.has(operationId)) {
+      throw new Error(`Media operation is already active: ${operationId}`)
+    }
+
+    const controller = new AbortController()
+    activeMediaOperations.set(operationId, controller)
+    return {
+      signal: controller.signal,
+      finish: () => {
+        if (activeMediaOperations.get(operationId) === controller) {
+          activeMediaOperations.delete(operationId)
+        }
+      }
+    }
+  }
+
+  ipcMain.handle('ffmpeg:cancelMediaOperation', async (_event, operationId: unknown) => {
+    if (typeof operationId !== 'string' || operationId.trim().length === 0) return false
+    const controller = activeMediaOperations.get(operationId)
+    if (!controller) return false
+    controller.abort()
+    return true
+  })
+
   // Get video metadata
   ipcMain.handle(
     'ffmpeg:getMetadata',
-    async (_event, filePath: string) => {
-      return getVideoMetadata(filePath)
+    async (_event, filePath: string, operationId?: unknown) => {
+      const operation = createMediaOperation(operationId)
+      try {
+        return await getVideoMetadata(filePath, operation.signal)
+      } finally {
+        operation.finish()
+      }
     }
   )
 
   // Extract audio for whisper
   ipcMain.handle(
     'ffmpeg:extractAudio',
-    async (_event, videoPath: string) => {
+    async (_event, videoPath: string, operationId?: unknown) => {
+      const operation = createMediaOperation(operationId)
       const tmpPath = trackTempFile(join(tmpdir(), `batchedit-audio-${uuidv4()}.wav`))
       try {
-        return await extractAudio(videoPath, tmpPath)
-      } catch (err) {
+        return await extractAudio(videoPath, tmpPath, operation.signal)
+      } catch (error) {
         releaseTempFile(tmpPath)
-        throw err
+        throw error
+      } finally {
+        operation.finish()
       }
     }
   )
@@ -961,76 +1014,119 @@ export function setupRenderPipeline(options: RenderPipelineOptions = {}): void {
     async (
       event,
       videoPath: string,
-      segments: Array<{ label: string; bucket: string; startTime: number; endTime: number }>,
-      outputDir: string | null
-    ) => {
+      segments: Array<{
+        label: string
+        bucket: SplitClipResult['bucket']
+        startTime: number
+        endTime: number
+      }>,
+      outputDir: string | null,
+      operationId?: unknown
+    ): Promise<SplitVideoResult> => {
+      const operation = createMediaOperation(operationId)
       const explicitOutputDirectory = outputDir && outputDir.length > 0 ? outputDir : null
       const managedRunId = uuidv4()
-      if (explicitOutputDirectory) mkdirSync(explicitOutputDirectory, { recursive: true })
+      const results: SplitClipResult[] = []
 
-      const total = segments.length
-      const sendProgress = (completed: number): void => {
-        event.sender.send('split:progress', { completed, total })
-      }
-      sendProgress(0)
+      try {
+        if (explicitOutputDirectory) mkdirSync(explicitOutputDirectory, { recursive: true })
 
-      const results: Array<{ label: string; bucket: string; outputPath: string }> = []
-      const nameCount = new Map<string, number>()
-      for (const seg of segments) {
-        const safeName = seg.label.replace(/[<>:"/\\|?*]+/g, '_').replace(/\s+/g, '_')
-        const count = (nameCount.get(safeName) || 0) + 1
-        nameCount.set(safeName, count)
-        const fileName = `${count > 1 ? `${safeName}_${count}` : safeName}.mp4`
-        const outputPath = explicitOutputDirectory
-          ? join(explicitOutputDirectory, fileName)
-          : createManagedMediaPath({
-              userDataPath: app.getPath('userData'),
-              operation: 'smart-split',
-              fileName,
-              runId: managedRunId
-            })
-        await trimVideo(videoPath, outputPath, seg.startTime, seg.endTime)
-        results.push({ label: seg.label, bucket: seg.bucket, outputPath })
-        sendProgress(results.length)
+        const total = segments.length
+        const sendProgress = (completed: number): void => {
+          event.sender.send('split:progress', { completed, total })
+        }
+        sendProgress(0)
+
+        const nameCount = new Map<string, number>()
+        for (const segment of segments) {
+          const safeName = segment.label.replace(/[<>:"/\\|?*]+/g, '_').replace(/\s+/g, '_')
+          let count = (nameCount.get(safeName) || 0) + 1
+          let fileName = `${count > 1 ? `${safeName}_${count}` : safeName}.mp4`
+          if (explicitOutputDirectory) {
+            while (existsSync(join(explicitOutputDirectory, fileName))) {
+              count += 1
+              fileName = `${safeName}_${count}.mp4`
+            }
+          }
+          nameCount.set(safeName, count)
+
+          const outputPath = explicitOutputDirectory
+            ? join(explicitOutputDirectory, fileName)
+            : createManagedMediaPath({
+                userDataPath: app.getPath('userData'),
+                operation: 'smart-split',
+                fileName,
+                runId: managedRunId
+              })
+          await trimVideo(
+            videoPath,
+            outputPath,
+            segment.startTime,
+            segment.endTime,
+            operation.signal
+          )
+          results.push({ label: segment.label, bucket: segment.bucket, outputPath })
+          sendProgress(results.length)
+        }
+
+        return operation.signal?.aborted
+          ? { outcome: 'canceled', clips: results }
+          : { outcome: 'completed', clips: results }
+      } catch (error) {
+        if (isMediaOperationCanceled(error)) {
+          return { outcome: 'canceled', clips: results }
+        }
+        throw error
+      } finally {
+        operation.finish()
       }
-      return results
     }
   )
 
   // Detect leading silence duration
   ipcMain.handle(
     'ffmpeg:detectLeadingSilence',
-    async (_event, videoPath: string) => {
-      return detectLeadingSilence(videoPath)
+    async (_event, videoPath: string, operationId?: unknown) => {
+      const operation = createMediaOperation(operationId)
+      try {
+        return await detectLeadingSilence(videoPath, -40, 0.1, operation.signal)
+      } finally {
+        operation.finish()
+      }
     }
   )
 
   // Trim leading silence from a clip
   ipcMain.handle(
     'ffmpeg:trimLeadingSilence',
-    async (_event, videoPath: string, outputDir?: string) => {
+    async (_event, videoPath: string, outputDir?: string, operationId?: unknown) => {
+      const operation = createMediaOperation(operationId)
       const startedAt = Date.now()
-      const result = await captureTrimLeadingSilenceResult(async () => {
-        const runId = uuidv4()
-        const sourceName = basename(videoPath, extname(videoPath))
-        const fileName = `${sourceName}-trimmed.mp4`
-        const outPath = outputDir && outputDir.length > 0
-          ? join(outputDir, `batchedit-trimmed-${runId}.mp4`)
-          : createManagedMediaPath({
-              userDataPath: app.getPath('userData'),
-              operation: 'silence-trim',
-              fileName,
-              runId
-            })
-        if (outputDir) mkdirSync(outputDir, { recursive: true })
-        return trimLeadingSilence(videoPath, outPath)
-      })
-      console.info('[Silence trim]', {
-        videoPath,
-        outcome: result.outcome,
-        elapsedMs: Date.now() - startedAt
-      })
-      return result
+      try {
+        const result = await captureTrimLeadingSilenceResult(async () => {
+          const runId = uuidv4()
+          const sourceName = basename(videoPath, extname(videoPath))
+          const fileName = `${sourceName}-trimmed.mp4`
+          const outPath = outputDir && outputDir.length > 0
+            ? join(outputDir, `batchedit-trimmed-${runId}.mp4`)
+            : createManagedMediaPath({
+                userDataPath: app.getPath('userData'),
+                operation: 'silence-trim',
+                fileName,
+                runId
+              })
+          if (outputDir) mkdirSync(outputDir, { recursive: true })
+          return trimLeadingSilence(videoPath, outPath, 0.05, operation.signal)
+        })
+        console.info('[Silence trim]', {
+          videoPath,
+          outcome: result.outcome,
+          elapsedMs: Date.now() - startedAt
+        })
+        return result
+      } finally {
+        operation.finish()
+      }
     }
   )
 
@@ -1042,8 +1138,10 @@ export function setupRenderPipeline(options: RenderPipelineOptions = {}): void {
       videoPath: string,
       outputDir: string | null,
       startTime: number,
-      endTime: number
+      endTime: number,
+      operationId?: unknown
     ) => {
+      const operation = createMediaOperation(operationId)
       const runId = uuidv4()
       const sourceName = basename(videoPath, extname(videoPath))
       const fileName = `${sourceName}-edited.mp4`
@@ -1056,7 +1154,11 @@ export function setupRenderPipeline(options: RenderPipelineOptions = {}): void {
             runId
           })
       if (outputDir) mkdirSync(outputDir, { recursive: true })
-      return trimVideoReencode(videoPath, outPath, startTime, endTime)
+      try {
+        return await trimVideoReencode(videoPath, outPath, startTime, endTime, operation.signal)
+      } finally {
+        operation.finish()
+      }
     }
   )
 

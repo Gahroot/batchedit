@@ -5,7 +5,15 @@ import { join } from 'path'
 
 const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
-  trimVideo: vi.fn(async () => undefined),
+  trimVideo: vi.fn<
+    (
+      inputPath: string,
+      outputPath: string,
+      startTime: number,
+      endTime: number,
+      signal?: AbortSignal
+    ) => Promise<void>
+  >(async () => undefined),
   trimLeadingSilence: vi.fn(async (_sourcePath: string, outputPath: string) => ({
     outputPath,
     trimmedSeconds: 0.25
@@ -38,7 +46,10 @@ vi.mock('./ffmpeg', () => ({
   trimLeadingSilence: mocks.trimLeadingSilence,
   getEncoder: vi.fn(() => ({ encoder: 'libx264' })),
   getSoftwareEncoder: vi.fn(() => ({ encoder: 'libx264' })),
-  isGpuSessionError: vi.fn(() => false)
+  isGpuSessionError: vi.fn(() => false),
+  isMediaOperationCanceled: vi.fn(
+    (error: unknown) => error instanceof Error && error.name === 'MediaOperationCanceledError'
+  )
 }))
 
 import { setupRenderPipeline } from './render-pipeline'
@@ -79,17 +90,21 @@ describe('generated media render handlers', () => {
       sourcePath,
       expect.stringContaining(join(mocks.userDataPath, 'media', 'smart-split')),
       0,
-      1
+      1,
+      undefined
     )
     expect(mocks.trimLeadingSilence).toHaveBeenCalledWith(
       sourcePath,
-      expect.stringContaining(join(mocks.userDataPath, 'media', 'silence-trim'))
+      expect.stringContaining(join(mocks.userDataPath, 'media', 'silence-trim')),
+      0.05,
+      undefined
     )
     expect(mocks.trimVideoReencode).toHaveBeenCalledWith(
       sourcePath,
       expect.stringContaining(join(mocks.userDataPath, 'media', 'clip-editor')),
       0,
-      1
+      1,
+      undefined
     )
   })
 
@@ -110,17 +125,21 @@ describe('generated media render handlers', () => {
       sourcePath,
       expect.stringContaining(selectedDirectory),
       0,
-      1
+      1,
+      undefined
     )
     expect(mocks.trimLeadingSilence).toHaveBeenCalledWith(
       sourcePath,
-      expect.stringContaining(selectedDirectory)
+      expect.stringContaining(selectedDirectory),
+      0.05,
+      undefined
     )
     expect(mocks.trimVideoReencode).toHaveBeenCalledWith(
       sourcePath,
       expect.stringContaining(selectedDirectory),
       0,
-      1
+      1,
+      undefined
     )
   })
 
@@ -139,5 +158,60 @@ describe('generated media render handlers', () => {
       outcome: 'trim-failure',
       error: 'encoder failed'
     })
+  })
+
+  it('cancels an active split and returns every safely completed output', async () => {
+    const sourcePath = join(tmpdir(), 'source.mp4')
+    let activeSignal: AbortSignal | undefined
+    mocks.trimVideo
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(
+        async (
+          _inputPath: string,
+          _outputPath: string,
+          _startTime: number,
+          _endTime: number,
+          signal?: AbortSignal
+        ) => {
+          activeSignal = signal
+          await new Promise<void>((_resolve, reject) => {
+            signal?.addEventListener(
+              'abort',
+              () => {
+                const cancellationError = new Error('canceled')
+                cancellationError.name = 'MediaOperationCanceledError'
+                reject(cancellationError)
+              },
+              { once: true })
+          })
+        }
+      )
+
+    const splitPromise = getHandler('ffmpeg:splitVideo')(
+      { sender: { send: vi.fn() } },
+      sourcePath,
+      [
+        { label: 'Hook 1', bucket: 'hook', startTime: 0, endTime: 1 },
+        { label: 'Meat 1', bucket: 'meat', startTime: 1, endTime: 2 }
+      ],
+      null,
+      'split-operation'
+    )
+    await vi.waitFor(() => expect(mocks.trimVideo).toHaveBeenCalledTimes(2))
+
+    await expect(getHandler('ffmpeg:cancelMediaOperation')({}, 'split-operation')).resolves.toBe(
+      true
+    )
+    await expect(splitPromise).resolves.toEqual({
+      outcome: 'canceled',
+      clips: [
+        {
+          label: 'Hook 1',
+          bucket: 'hook',
+          outputPath: expect.stringContaining('Hook_1.mp4')
+        }
+      ]
+    })
+    expect(activeSignal?.aborted).toBe(true)
   })
 })

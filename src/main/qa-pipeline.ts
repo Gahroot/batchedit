@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { detectMarkers } from '../shared/marker-detection'
 import type { BucketType, ClipQaResult, Leak, WordChunk } from '../shared/types'
 import { recutSourceClip } from './clip-recut'
-import { getVideoMetadata } from './ffmpeg'
+import { getVideoMetadata, MediaOperationCanceledError } from './ffmpeg'
 import { requestQaTranscription } from './qa-renderer-rpc'
 import { readTranscriptCache, writeTranscriptCache } from './transcript-cache'
 
@@ -116,9 +116,11 @@ async function verifyClipBoundaries(
   trailingLeak: Leak | null
   confidence: number
 }> {
-  const metadata = await getVideoMetadata(clipPath)
+  if (signal?.aborted) throw new MediaOperationCanceledError()
+  const metadata = await getVideoMetadata(clipPath, signal)
   const duration = metadata.duration
   const { words: transcript } = await transcribeClip(win, clipPath, model, signal)
+  if (signal?.aborted) throw new MediaOperationCanceledError()
   const windowSec = windowMs / 1000
   const leading = transcript.filter((word) => word.start < windowSec)
   const trailing = transcript.filter((word) => word.end > Math.max(0, duration - windowSec))
@@ -184,6 +186,7 @@ async function qaSingleClip(
   let recutCount = 0
 
   while (true) {
+    if (signal?.aborted) throw new MediaOperationCanceledError()
     const state = await verifyClipBoundaries(win, path, clip.bucket, windowMs, model, signal)
 
     const base: Omit<ClipQaResult, 'status'> = {
@@ -221,7 +224,13 @@ async function qaSingleClip(
       return { ...base, status: 'flagged' }
     }
 
-    const recut = await recutSourceClip(path, sourcePath, bounds.start * 1000, bounds.end * 1000)
+    const recut = await recutSourceClip(
+      path,
+      sourcePath,
+      bounds.start * 1000,
+      bounds.end * 1000,
+      signal
+    )
     path = recut.outputPath
     duration = recut.duration
     start = bounds.start
@@ -252,14 +261,28 @@ export async function runBoundaryQA(
   clips: QaClipInput[],
   options: BoundaryQaOptions = {},
   signal?: AbortSignal
-): Promise<{ clips: ClipQaResult[]; cleanCount: number; autoFixedCount: number; flaggedCount: number }> {
+): Promise<{
+  clips: ClipQaResult[]
+  cleanCount: number
+  autoFixedCount: number
+  flaggedCount: number
+}> {
   const windowMs = options.windowMs ?? QA_WINDOW_MS
   const maxRecuts = options.maxRecuts ?? MAX_AUTO_RECUTS
 
   const results: ClipQaResult[] = []
   for (const clip of clips) {
+    if (signal?.aborted) throw new MediaOperationCanceledError()
     const startedAt = Date.now()
-    const result = await qaSingleClip(win, sourcePath, clip, windowMs, maxRecuts, options.model, signal)
+    const result = await qaSingleClip(
+      win,
+      sourcePath,
+      clip,
+      windowMs,
+      maxRecuts,
+      options.model,
+      signal
+    )
     results.push(result)
     console.info('qa_pipeline_clip', {
       label: result.label,
@@ -307,8 +330,22 @@ export async function manualRecutClip(
     throw new Error('Nudge would make the clip too short')
   }
 
-  const recut = await recutSourceClip(params.clipPath, params.sourcePath, start * 1000, end * 1000)
-  const state = await verifyClipBoundaries(win, recut.outputPath, params.bucket, QA_WINDOW_MS, params.model, signal)
+  if (signal?.aborted) throw new MediaOperationCanceledError()
+  const recut = await recutSourceClip(
+    params.clipPath,
+    params.sourcePath,
+    start * 1000,
+    end * 1000,
+    signal
+  )
+  const state = await verifyClipBoundaries(
+    win,
+    recut.outputPath,
+    params.bucket,
+    QA_WINDOW_MS,
+    params.model,
+    signal
+  )
 
   return {
     label: params.label,

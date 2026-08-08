@@ -207,116 +207,227 @@ export function getResolvedFfmpegPath(): string | null {
   return resolvedFfmpegPath
 }
 
+export class MediaOperationCanceledError extends Error {
+  constructor() {
+    super('Media operation canceled')
+    this.name = 'MediaOperationCanceledError'
+  }
+}
+
+export function isMediaOperationCanceled(error: unknown): boolean {
+  return error instanceof MediaOperationCanceledError
+}
+
+function throwIfMediaOperationCanceled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new MediaOperationCanceledError()
+}
+
+async function executeFfmpegCommand(
+  command: ffmpeg.FfmpegCommand,
+  start: () => void,
+  signal?: AbortSignal
+): Promise<void> {
+  throwIfMediaOperationCanceled(signal)
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false
+    const handleAbort = (): void => {
+      try {
+        command.kill('SIGKILL')
+      } catch {}
+    }
+    const finish = (result: { ok: true } | { ok: false; error: unknown }): void => {
+      if (settled) return
+      settled = true
+      signal?.removeEventListener('abort', handleAbort)
+      if (result.ok) resolve()
+      else reject(result.error)
+    }
+
+    signal?.addEventListener('abort', handleAbort, { once: true })
+    command
+      .on('start', () => {
+        if (signal?.aborted) handleAbort()
+      })
+      .on('end', () => {
+        finish(
+          signal?.aborted ? { ok: false, error: new MediaOperationCanceledError() } : { ok: true }
+        )
+      })
+      .on('error', (error) => {
+        finish({
+          ok: false,
+          error: signal?.aborted ? new MediaOperationCanceledError() : error
+        })
+      })
+
+    try {
+      start()
+    } catch (error) {
+      finish({ ok: false, error })
+    }
+  })
+}
+
+interface ProbedVideoMetadata {
+  duration: number
+  width: number
+  height: number
+  codec: string
+  fps: number
+  audioCodec: string
+}
+
 export function getVideoMetadata(
-  filePath: string
-): Promise<{ duration: number; width: number; height: number; codec: string; fps: number; audioCodec: string }> {
+  filePath: string,
+  signal?: AbortSignal
+): Promise<ProbedVideoMetadata> {
+  throwIfMediaOperationCanceled(signal)
+
   return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err, metadata) => {
-      if (err) return reject(err)
-      const video = metadata.streams.find((s) => s.codec_type === 'video')
-      if (!video) return reject(new Error('No video stream found'))
-      const audio = metadata.streams.find((s) => s.codec_type === 'audio')
+    let settled = false
+    const handleAbort = (): void => {
+      finish({ ok: false, error: new MediaOperationCanceledError() })
+    }
+    const finish = (
+      result: { ok: true; value: ProbedVideoMetadata } | { ok: false; error: unknown }
+    ): void => {
+      if (settled) return
+      settled = true
+      signal?.removeEventListener('abort', handleAbort)
+      if (result.ok) resolve(result.value)
+      else reject(result.error)
+    }
+    signal?.addEventListener('abort', handleAbort, { once: true })
+
+    ffmpeg.ffprobe(filePath, (error, metadata) => {
+      if (signal?.aborted) {
+        finish({ ok: false, error: new MediaOperationCanceledError() })
+        return
+      }
+      if (error) {
+        finish({ ok: false, error })
+        return
+      }
+      const video = metadata.streams.find((stream) => stream.codec_type === 'video')
+      if (!video) {
+        finish({ ok: false, error: new Error('No video stream found') })
+        return
+      }
+      const audio = metadata.streams.find((stream) => stream.codec_type === 'audio')
       // Parse r_frame_rate (e.g. "30/1", "30000/1001")
       let fps = 0
-      const rateStr = (video as any).r_frame_rate || (video as any).avg_frame_rate || ''
+      const rateStr = video.r_frame_rate || video.avg_frame_rate || ''
       if (rateStr) {
         const parts = rateStr.split('/')
         if (parts.length === 2) {
-          const num = parseFloat(parts[0])
-          const den = parseFloat(parts[1])
-          if (den > 0) fps = num / den
+          const numerator = Number.parseFloat(parts[0] ?? '')
+          const denominator = Number.parseFloat(parts[1] ?? '')
+          if (denominator > 0) fps = numerator / denominator
         } else {
-          fps = parseFloat(rateStr) || 0
+          fps = Number.parseFloat(rateStr) || 0
         }
       }
-      resolve({
-        duration: metadata.format.duration || 0,
-        width: video.width || 0,
-        height: video.height || 0,
-        codec: video.codec_name || 'unknown',
-        fps,
-        audioCodec: audio?.codec_name || 'unknown'
+      finish({
+        ok: true,
+        value: {
+          duration: metadata.format.duration || 0,
+          width: video.width || 0,
+          height: video.height || 0,
+          codec: video.codec_name || 'unknown',
+          fps,
+          audioCodec: audio?.codec_name || 'unknown'
+        }
       })
     })
   })
 }
 
-export function extractAudio(videoPath: string, outputPath: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    ffmpeg(videoPath)
-      .noVideo()
-      .audioFrequency(16000)
-      .audioChannels(1)
-      .format('wav')
-      .on('end', () => resolve(outputPath))
-      .on('error', (err) => {
-        try { unlinkSync(outputPath) } catch {}
-        reject(err)
-      })
-      .save(outputPath)
-  })
-}
-
-export function trimVideo(
-  inputPath: string,
+export async function extractAudio(
+  videoPath: string,
   outputPath: string,
-  startTime: number,
-  endTime: number
+  signal?: AbortSignal
 ): Promise<string> {
-  return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
-      .setStartTime(startTime)
-      .setDuration(endTime - startTime)
-      .outputOptions(['-y', '-c', 'copy'])
-      .on('end', () => resolve(outputPath))
-      .on('error', () => {
-        try { unlinkSync(outputPath) } catch {}
-        // Fallback: re-encode if stream copy fails
-        const { encoder, presetFlag } = getEncoder()
-        ffmpeg(inputPath)
-          .setStartTime(startTime)
-          .setDuration(endTime - startTime)
-          .outputOptions(['-y', '-c:v', encoder, ...presetFlag, '-c:a', 'aac'])
-          .on('end', () => resolve(outputPath))
-          .on('error', (err) => {
-            try { unlinkSync(outputPath) } catch {}
-            reject(err)
-          })
-          .save(outputPath)
-      })
-      .save(outputPath)
-  })
+  const command = ffmpeg(videoPath)
+    .noVideo()
+    .audioFrequency(16000)
+    .audioChannels(1)
+    .format('wav')
+
+  try {
+    await executeFfmpegCommand(command, () => command.save(outputPath), signal)
+    return outputPath
+  } catch (error) {
+    try { unlinkSync(outputPath) } catch {}
+    throw error
+  }
 }
 
-export function trimVideoReencode(
+export async function trimVideo(
   inputPath: string,
   outputPath: string,
   startTime: number,
-  endTime: number
+  endTime: number,
+  signal?: AbortSignal
+): Promise<string> {
+  const streamCopyCommand = ffmpeg(inputPath)
+    .setStartTime(startTime)
+    .setDuration(endTime - startTime)
+    .outputOptions(['-y', '-c', 'copy'])
+
+  try {
+    await executeFfmpegCommand(streamCopyCommand, () => streamCopyCommand.save(outputPath), signal)
+    return outputPath
+  } catch (error) {
+    try { unlinkSync(outputPath) } catch {}
+    if (isMediaOperationCanceled(error)) throw error
+  }
+
+  const { encoder, presetFlag } = getEncoder()
+  const reencodeCommand = ffmpeg(inputPath)
+    .setStartTime(startTime)
+    .setDuration(endTime - startTime)
+    .outputOptions(['-y', '-c:v', encoder, ...presetFlag, '-c:a', 'aac'])
+
+  try {
+    await executeFfmpegCommand(reencodeCommand, () => reencodeCommand.save(outputPath), signal)
+    return outputPath
+  } catch (error) {
+    try { unlinkSync(outputPath) } catch {}
+    throw error
+  }
+}
+
+export async function trimVideoReencode(
+  inputPath: string,
+  outputPath: string,
+  startTime: number,
+  endTime: number,
+  signal?: AbortSignal
 ): Promise<string> {
   const { encoder, presetFlag } = getEncoder()
-  return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
-      .setStartTime(startTime)
-      .setDuration(endTime - startTime)
-      .outputOptions(['-y', '-c:v', encoder, ...presetFlag, '-c:a', 'aac'])
-      .on('end', () => resolve(outputPath))
-      .on('error', (err) => {
-        try { unlinkSync(outputPath) } catch {}
-        reject(err)
-      })
-      .save(outputPath)
-  })
+  const command = ffmpeg(inputPath)
+    .setStartTime(startTime)
+    .setDuration(endTime - startTime)
+    .outputOptions(['-y', '-c:v', encoder, ...presetFlag, '-c:a', 'aac'])
+
+  try {
+    await executeFfmpegCommand(command, () => command.save(outputPath), signal)
+    return outputPath
+  } catch (error) {
+    try { unlinkSync(outputPath) } catch {}
+    throw error
+  }
 }
 
 export function parseSilenceStart(line: string): number | null {
   const match = line.match(/silence_start:\s*([\d.]+)/)
-  return match ? parseFloat(match[1]) : null
+  return match ? Number.parseFloat(match[1] ?? '') : null
 }
 
 export function parseSilenceEnd(line: string): number | null {
   const match = line.match(/silence_end:\s*([\d.]+)/)
-  return match ? parseFloat(match[1]) : null
+  return match ? Number.parseFloat(match[1] ?? '') : null
 }
 
 export interface SilenceBounds {
@@ -325,63 +436,65 @@ export interface SilenceBounds {
   lastSilenceEnd: number | null
 }
 
-export function detectSilenceBounds(
+export async function detectSilenceBounds(
   filePath: string,
   noiseDb = -40,
-  minDuration = 0.1
+  minDuration = 0.1,
+  signal?: AbortSignal
 ): Promise<SilenceBounds> {
-  return new Promise((resolve, reject) => {
-    const nullDev = process.platform === 'win32' ? 'NUL' : '/dev/null'
-    let firstSilenceStart: number | null = null
-    let leadingEnd = 0
-    let leadingResolved = false
-    let lastSilenceStart: number | null = null
-    let lastSilenceEnd: number | null = null
+  const nullDev = process.platform === 'win32' ? 'NUL' : '/dev/null'
+  let firstSilenceStart: number | null = null
+  let leadingEnd = 0
+  let leadingResolved = false
+  let lastSilenceStart: number | null = null
+  let lastSilenceEnd: number | null = null
 
-    ffmpeg(filePath)
-      .audioFilters(`silencedetect=noise=${noiseDb}dB:d=${minDuration}`)
-      .format('null')
-      .output(nullDev)
-      .on('stderr', (line: string) => {
-        const startVal = parseSilenceStart(line)
-        if (startVal !== null) {
-          if (firstSilenceStart === null) firstSilenceStart = startVal
-          lastSilenceStart = startVal
-        }
+  const command = ffmpeg(filePath)
+    .audioFilters(`silencedetect=noise=${noiseDb}dB:d=${minDuration}`)
+    .format('null')
+    .output(nullDev)
+    .on('stderr', (line: string) => {
+      const startVal = parseSilenceStart(line)
+      if (startVal !== null) {
+        if (firstSilenceStart === null) firstSilenceStart = startVal
+        lastSilenceStart = startVal
+      }
 
-        const endVal = parseSilenceEnd(line)
-        if (endVal !== null) {
-          if (!leadingResolved) {
-            if (firstSilenceStart !== null && firstSilenceStart < 0.01) {
-              leadingEnd = endVal
-            }
-            leadingResolved = true
+      const endVal = parseSilenceEnd(line)
+      if (endVal !== null) {
+        if (!leadingResolved) {
+          if (firstSilenceStart !== null && firstSilenceStart < 0.01) {
+            leadingEnd = endVal
           }
-          lastSilenceEnd = endVal
+          leadingResolved = true
         }
-      })
-      .on('end', () => resolve({ leadingEnd, lastSilenceStart, lastSilenceEnd }))
-      .on('error', (error) => reject(error))
-      .run()
-  })
+        lastSilenceEnd = endVal
+      }
+    })
+
+  await executeFfmpegCommand(command, () => command.run(), signal)
+  return { leadingEnd, lastSilenceStart, lastSilenceEnd }
 }
 
 export async function detectLeadingSilence(
   filePath: string,
   noiseDb = -40,
-  minDuration = 0.1
+  minDuration = 0.1,
+  signal?: AbortSignal
 ): Promise<number> {
-  const bounds = await detectSilenceBounds(filePath, noiseDb, minDuration)
+  const bounds = await detectSilenceBounds(filePath, noiseDb, minDuration, signal)
   return bounds.leadingEnd
 }
 
 export async function trimLeadingSilence(
   inputPath: string,
   outputPath: string,
-  safetyMarginSec = 0.05
+  safetyMarginSec = 0.05,
+  signal?: AbortSignal
 ): Promise<{ outputPath: string; trimmedSeconds: number }> {
-  const bounds = await detectSilenceBounds(inputPath)
-  const meta = await getVideoMetadata(inputPath)
+  const bounds = await detectSilenceBounds(inputPath, -40, 0.1, signal)
+  const meta = await getVideoMetadata(inputPath, signal)
+  throwIfMediaOperationCanceled(signal)
 
   // Leading: trim if silence >= 100ms at start
   const trimStart = bounds.leadingEnd >= 0.1
@@ -396,7 +509,7 @@ export async function trimLeadingSilence(
       || bounds.lastSilenceStart > bounds.lastSilenceEnd
     // Last silence_end reaches file end
     const endsAtFile = bounds.lastSilenceEnd !== null
-      && (meta.duration - bounds.lastSilenceEnd) < 0.05
+      && meta.duration - bounds.lastSilenceEnd < 0.05
 
     if (inSilence || endsAtFile) {
       trimEnd = Math.min(meta.duration, bounds.lastSilenceStart + safetyMarginSec)
@@ -413,7 +526,7 @@ export async function trimLeadingSilence(
     return { outputPath: inputPath, trimmedSeconds: 0 }
   }
 
-  await trimVideo(inputPath, outputPath, trimStart, trimEnd)
+  await trimVideo(inputPath, outputPath, trimStart, trimEnd, signal)
   return { outputPath, trimmedSeconds: totalTrimmed }
 }
 

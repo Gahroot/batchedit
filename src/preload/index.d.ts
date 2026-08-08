@@ -1,5 +1,9 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
-import type { SourceFileSignaturesResult, TrimLeadingSilenceResult } from '../shared/types'
+import type {
+  SourceFileSignaturesResult,
+  SplitVideoResult,
+  TrimLeadingSilenceResult
+} from '../shared/types'
 
 type Platform = 'tiktok' | 'reels' | 'shorts' | 'universal'
 type BucketType = 'hook' | 'meat' | 'cta'
@@ -139,8 +143,9 @@ interface Api {
   showItemInFolder: (fullPath: string) => Promise<void>
   openPath: (fullPath: string) => Promise<string>
   getFFmpegReadiness: () => Promise<{ ready: boolean; issues: string[] }>
-  getMetadata: (filePath: string) => Promise<VideoMetadata>
-  extractAudio: (videoPath: string) => Promise<string>
+  getMetadata: (filePath: string, operationId?: string) => Promise<VideoMetadata>
+  extractAudio: (videoPath: string, operationId?: string) => Promise<string>
+  cancelMediaOperation: (operationId: string) => Promise<boolean>
   generateAss: (
     captions: CaptionEntry[],
     resolution: { width: number; height: number }
@@ -161,13 +166,24 @@ interface Api {
   }) => Promise<string>
   splitVideo(
     videoPath: string,
-    segments: Array<{ label: string; bucket: string; startTime: number; endTime: number }>,
-    outputDir: string | null
-  ): Promise<Array<{ label: string; bucket: string; outputPath: string }>>
+    segments: Array<{ label: string; bucket: BucketType; startTime: number; endTime: number }>,
+    outputDir: string | null,
+    operationId?: string
+  ): Promise<SplitVideoResult>
   onSplitProgress: (callback: (progress: { completed: number; total: number }) => void) => () => void
-  trimVideoReencode: (videoPath: string, outputDir: string | null, startTime: number, endTime: number) => Promise<string>
-  detectLeadingSilence: (videoPath: string) => Promise<number>
-  trimLeadingSilence: (videoPath: string, outputDir?: string) => Promise<TrimLeadingSilenceResult>
+  trimVideoReencode: (
+    videoPath: string,
+    outputDir: string | null,
+    startTime: number,
+    endTime: number,
+    operationId?: string
+  ) => Promise<string>
+  detectLeadingSilence: (videoPath: string, operationId?: string) => Promise<number>
+  trimLeadingSilence: (
+    videoPath: string,
+    outputDir?: string,
+    operationId?: string
+  ) => Promise<TrimLeadingSilenceResult>
   generateHookText: (apiKey: string, transcript: string) => Promise<string>
   saveProject: (projectData: string, activeProjectPath: string | null) => Promise<string | null>
   loadProject: () => Promise<{ path: string; data: string } | null>
@@ -199,7 +215,9 @@ interface Api {
         duration: number
       }>
       windowMs?: number
+      operationId?: string
     }) => Promise<BoundaryQaReport>
+    cancelBoundaryQA: (operationId: string) => Promise<boolean>
     recutClip: (params: {
       clipPath: string
       sourcePath: string
@@ -210,6 +228,7 @@ interface Api {
       startDeltaMs: number
       endDeltaMs: number
       model?: string
+      operationId?: string
     }) => Promise<ClipQaResult>
   }
   qaBridge: {
