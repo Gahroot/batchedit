@@ -5,6 +5,12 @@
 
 import { pipeline, AutoModel, Tensor } from '@huggingface/transformers'
 import type { AutomaticSpeechRecognitionConfig } from '@huggingface/transformers'
+import {
+  detectWhisperDevice,
+  LARGE_WHISPER_MODEL,
+  WASM_DEFAULT_WHISPER_MODEL,
+  WHISPER_DEVICE
+} from '../lib/whisper-config'
 
 // Silero VAD constants (from transformers.js-examples/moonshine-web/constants.js)
 const SAMPLE_RATE = 16000
@@ -14,7 +20,7 @@ const MIN_SILENCE_DURATION_MS = 400
 const VAD_WINDOW_SIZE = 512  // required Silero VAD window at 16kHz
 const DEFAULT_ASR_CHUNK_LENGTH_S = 30
 const DEFAULT_ASR_STRIDE_LENGTH_S = 5
-const DEFAULT_WHISPER_MODEL = 'onnx-community/whisper-large-v3-turbo_timestamped'
+const DEFAULT_WHISPER_MODEL = WASM_DEFAULT_WHISPER_MODEL
 
 type WhisperAsrOptions = Pick<
   AutomaticSpeechRecognitionConfig,
@@ -123,14 +129,19 @@ export function normalizeTranscriptionChunks(raw: unknown, offset = 0): Transcri
   return deduped
 }
 
-type WorkerRequest = {
-  type: 'load' | 'transcribe'
-  requestId?: string
-  data?: {
-    model?: string
-    audio?: Float32Array
-  }
-}
+type WorkerRequest =
+  | {
+      type: 'load' | 'transcribe'
+      requestId?: string
+      data?: {
+        model?: string
+        audio?: Float32Array
+      }
+    }
+  | {
+      type: 'cancel'
+      requestIds: string[]
+    }
 
 let activeLoadRequestId: string | null = null
 let activeTranscribeRequestId: string | null = null
@@ -147,15 +158,6 @@ function postWorkerMessage(message: Record<string, unknown>, requestId?: string)
   self.postMessage(requestId ? { ...message, requestId } : message)
 }
 
-async function isWebGPUAvailable(): Promise<boolean> {
-  if (typeof navigator === 'undefined' || !(navigator as any).gpu) return false
-  try {
-    const adapter = await (navigator as any).gpu.requestAdapter()
-    return adapter != null
-  } catch {
-    return false
-  }
-}
 
 function getDtypeConfig(modelName: string, webgpu: boolean) {
   const isLarge = modelName.includes('large-v3') || modelName.includes('distil-large')
@@ -183,18 +185,29 @@ class PipelineFactory {
     }
 
     if (!this.instance) {
-      const webgpu = await isWebGPUAvailable()
-      this.device = webgpu ? 'webgpu' : 'wasm'
-      this.instance = await pipeline(
-        'automatic-speech-recognition',
-        targetModel,
-        {
-          dtype: getDtypeConfig(targetModel, webgpu) as any,
-          device: this.device,
-          progress_callback: progressCallback
-        }
-      )
-      this.currentModel = targetModel
+      const detectedDevice = await detectWhisperDevice()
+      const webgpu = detectedDevice === WHISPER_DEVICE.WEBGPU
+      if (!webgpu && targetModel === LARGE_WHISPER_MODEL) {
+        throw new Error('Whisper Large requires WebGPU. Choose Whisper Base for WASM on CPU.')
+      }
+
+      this.device = detectedDevice
+      try {
+        this.instance = await pipeline(
+          'automatic-speech-recognition',
+          targetModel,
+          {
+            dtype: getDtypeConfig(targetModel, webgpu) as any,
+            device: this.device,
+            progress_callback: progressCallback
+          }
+        )
+        this.currentModel = targetModel
+      } catch (error) {
+        this.instance = null
+        this.currentModel = null
+        throw error
+      }
     }
     return this.instance
   }
@@ -267,6 +280,16 @@ async function runVad(audio: Float32Array): Promise<SpeechInterval[]> {
 }
 
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
+  if (e.data.type === 'cancel') {
+    if (activeLoadRequestId && e.data.requestIds.includes(activeLoadRequestId)) {
+      activeLoadRequestId = null
+    }
+    if (activeTranscribeRequestId && e.data.requestIds.includes(activeTranscribeRequestId)) {
+      activeTranscribeRequestId = null
+    }
+    return
+  }
+
   const { type, data, requestId } = e.data
 
   switch (type) {

@@ -1,17 +1,20 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { Loader2, Play, Scissors } from 'lucide-react'
+import { Loader2, Play, Scissors, Square } from 'lucide-react'
 import { useWhisper } from '@/hooks/useWhisper'
+import { isWhisperCancellationError, WhisperCancellationError } from '@/hooks/whisper-client'
 import { normalize, matchBucketSingle, parseNumber } from '../../../shared/marker-detection'
 import { useStore, BucketType, WordChunk } from '../store'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
+import { WhisperModelControl } from './WhisperModelControl'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   Dialog,
   DialogContent,
   DialogHeader,
-  DialogTitle
+  DialogTitle,
+  DialogDescription
 } from '@/components/ui/dialog'
 
 function formatTime(seconds: number): string {
@@ -42,9 +45,12 @@ export function ClipEditor({ open, onOpenChange, clipId, bucket }: ClipEditorPro
   const updateClipPath = useStore((s) => s.updateClipPath)
 
   const videoRef = useRef<HTMLVideoElement>(null)
-  const { loadModel, transcribe, isModelLoading, isModelReady, loadProgress } = useWhisper()
+  const transcriptionRunId = useRef(0)
+  const { loadModel, transcribe, cancel, isModelLoading, loadProgress } = useWhisper()
+  const whisperModel = useStore((state) => state.whisperModel)
+  const whisperDevice = useStore((state) => state.whisperDevice)
 
-  const [isTranscribing, setIsTranscribing] = useState(false)
+  const [isPreparingTranscript, setIsPreparingTranscript] = useState(false)
   const [trimStart, setTrimStart] = useState<number | null>(null)
   const [trimEnd, setTrimEnd] = useState<number | null>(null)
   const [editingWordIdx, setEditingWordIdx] = useState<number | null>(null)
@@ -61,39 +67,55 @@ export function ClipEditor({ open, onOpenChange, clipId, bucket }: ClipEditorPro
     setPendingDropCount(null)
   }, [trimStart, trimEnd])
 
-  // Transcribe on first open if no transcript
-  useEffect(() => {
-    if (open && clip && !clip.transcript && !isTranscribing) {
-      runTranscription()
-    }
-  }, [open, clip?.id])
+  const runTranscription = async (): Promise<void> => {
+    if (!clip || whisperDevice === 'detecting') return
 
-  const runTranscription = async () => {
-    if (!clip) return
-    setIsTranscribing(true)
+    const runId = transcriptionRunId.current + 1
+    transcriptionRunId.current = runId
+    setIsPreparingTranscript(true)
     setError(null)
     let wavPath: string | null = null
+
+    const assertCurrentRun = (): void => {
+      if (transcriptionRunId.current !== runId) throw new WhisperCancellationError()
+    }
+
     try {
-      if (!isModelReady) {
-        await loadModel()
-      }
+      await loadModel(whisperModel)
+      assertCurrentRun()
       wavPath = await window.api.extractAudio(clip.path)
+      assertCurrentRun()
       const audioBuffer = await window.api.readAudioBuffer(wavPath)
       wavPath = null
-      const audioData = new Float32Array(audioBuffer)
-      const { chunks } = await transcribe(audioData)
-      const wordChunks: WordChunk[] = chunks.map((c) => ({
-        text: c.text,
-        start: c.start,
-        end: c.end
+      assertCurrentRun()
+      const { chunks } = await transcribe(new Float32Array(audioBuffer), whisperModel)
+      assertCurrentRun()
+      const wordChunks: WordChunk[] = chunks.map((chunk) => ({
+        text: chunk.text,
+        start: chunk.start,
+        end: chunk.end
       }))
       setClipTranscript(clipId, wordChunks)
-    } catch (err) {
+    } catch (error) {
       if (wavPath) await window.api.releaseTempFile(wavPath)
-      setError(err instanceof Error ? err.message : String(err))
+      if (!isWhisperCancellationError(error) && transcriptionRunId.current === runId) {
+        setError(error instanceof Error ? error.message : String(error))
+      }
     } finally {
-      setIsTranscribing(false)
+      if (transcriptionRunId.current === runId) setIsPreparingTranscript(false)
     }
+  }
+
+  const stopTranscription = (): void => {
+    transcriptionRunId.current += 1
+    cancel()
+    setIsPreparingTranscript(false)
+    setError(null)
+  }
+
+  const handleOpenChange = (nextOpen: boolean): void => {
+    if (!nextOpen && isPreparingTranscript) stopTranscription()
+    onOpenChange(nextOpen)
   }
 
   const seekVideo = useCallback((time: number) => {
@@ -218,13 +240,16 @@ export function ClipEditor({ open, onOpenChange, clipId, bucket }: ClipEditorPro
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-sm">
             <Scissors className="w-4 h-4" />
             Edit Clip: {clip.name}
           </DialogTitle>
+          <DialogDescription className="sr-only">
+            Trim the clip manually, or start optional transcription to snap cuts to spoken words.
+          </DialogDescription>
         </DialogHeader>
 
         {error && (
@@ -339,19 +364,26 @@ export function ClipEditor({ open, onOpenChange, clipId, bucket }: ClipEditorPro
           )}
         </div>
 
-        {/* Transcript */}
-        {isTranscribing || isModelLoading ? (
-          <div className="flex flex-col items-center gap-3 py-8">
-            <Loader2 className="w-8 h-8 animate-spin text-primary" />
-            <div className="text-center text-sm">
-              {isModelLoading ? (
-                <>
-                  <p>Loading Whisper model...</p>
-                  <Progress value={loadProgress} className="w-48 mt-2" />
-                </>
-              ) : (
-                <p>Transcribing...</p>
-              )}
+        {/* Transcript — manual editing never starts Whisper automatically. */}
+        {isPreparingTranscript ? (
+          <div className="rounded-md border border-border p-3 space-y-3">
+            <WhisperModelControl disabled />
+            <div className="flex flex-col items-center gap-3 py-3">
+              <Loader2 className="w-8 h-8 animate-spin text-primary" />
+              <div className="text-center text-sm">
+                {isModelLoading ? (
+                  <>
+                    <p>Loading the speech model…</p>
+                    <Progress value={loadProgress} className="w-48 mt-2" />
+                  </>
+                ) : (
+                  <p>Preparing audio and transcribing…</p>
+                )}
+              </div>
+              <Button variant="destructive" size="sm" onClick={stopTranscription}>
+                <Square className="w-3 h-3 fill-current" />
+                Stop transcription
+              </Button>
             </div>
           </div>
         ) : transcript && transcript.length > 0 ? (
@@ -408,11 +440,22 @@ export function ClipEditor({ open, onOpenChange, clipId, bucket }: ClipEditorPro
               </div>
             </ScrollArea>
           </div>
-        ) : !isTranscribing && !transcript ? (
-          <div className="text-center py-6 text-sm text-muted-foreground">
-            <Button variant="outline" size="sm" onClick={runTranscription}>
-              Transcribe Clip
-            </Button>
+        ) : !transcript ? (
+          <div className="rounded-md border border-border p-3 space-y-3">
+            <WhisperModelControl />
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-muted-foreground">
+                Transcription is optional. You can trim manually without downloading a model.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void runTranscription()}
+                disabled={whisperDevice === 'detecting'}
+              >
+                Start transcription
+              </Button>
+            </div>
           </div>
         ) : null}
 

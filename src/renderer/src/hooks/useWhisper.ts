@@ -4,7 +4,20 @@ import type { SpeechInterval, TranscribeResult, WhisperChunk } from './whisper-c
 
 export type { SpeechInterval, TranscribeResult, WhisperChunk }
 
-export function useWhisper() {
+export interface UseWhisperResult {
+  loadModel: (model?: string) => Promise<void>
+  transcribe: (audioData: Float32Array, model?: string) => Promise<TranscribeResult>
+  cancel: () => boolean
+  isModelLoading: boolean
+  isModelReady: boolean
+  isTranscribing: boolean
+  isBusy: boolean
+  loadProgress: number
+  loadingModel: string | null
+  loadedModel: string | null
+}
+
+export function useWhisper(): UseWhisperResult {
   const whisperState = useSyncExternalStore(sharedWhisperClient.subscribe, sharedWhisperClient.getSnapshot)
 
   const loadModel = useCallback((model?: string): Promise<void> => {
@@ -15,12 +28,18 @@ export function useWhisper() {
     return sharedWhisperClient.transcribe(audioData, model)
   }, [])
 
+  const cancel = useCallback((): boolean => sharedWhisperClient.cancel(), [])
+
   return {
     loadModel,
     transcribe,
+    cancel,
     isModelLoading: whisperState.isModelLoading,
     isModelReady: whisperState.isModelReady,
     isTranscribing: whisperState.isTranscribing,
-    loadProgress: whisperState.loadProgress
+    isBusy: whisperState.isModelLoading || whisperState.isTranscribing,
+    loadProgress: whisperState.loadProgress,
+    loadingModel: whisperState.loadingModel,
+    loadedModel: whisperState.loadedModel
   }
 }

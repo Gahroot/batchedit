@@ -1,6 +1,12 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import type { BucketType, ClipQaResult, Platform, TemplateLayout, WordChunk } from '../../shared/types'
+import {
+  resolveWhisperModel,
+  WASM_DEFAULT_WHISPER_MODEL,
+  type WhisperDevice,
+  type WhisperDeviceState
+} from './lib/whisper-config'
 
 export type { BucketType, ClipQaResult, Platform, TemplateLayout, WordChunk }
 
@@ -93,31 +99,6 @@ export interface CaptionStyle {
   animation: CaptionAnimation
 }
 
-export interface WhisperModelInfo {
-  id: string
-  /** Short picker label, e.g. "Tiny (fast)" */
-  label: string
-  /** Approximate one-time download size, e.g. "~75 MB" */
-  approxSize: string
-}
-
-// Approximate download sizes for the ONNX Whisper builds used by the renderer
-// Web Worker (transformers.js). Sizes are rough and only meant to set
-// expectations before a one-time, cached download.
-export const WHISPER_MODELS: readonly WhisperModelInfo[] = [
-  { id: 'onnx-community/whisper-tiny.en_timestamped', label: 'Tiny (fast)', approxSize: '~75 MB' },
-  { id: 'onnx-community/whisper-base.en_timestamped', label: 'Base (balanced)', approxSize: '~145 MB' },
-  { id: 'onnx-community/whisper-small.en_timestamped', label: 'Small (accurate)', approxSize: '~490 MB' },
-  {
-    id: 'onnx-community/whisper-large-v3-turbo_timestamped',
-    label: 'Turbo (best, WebGPU)',
-    approxSize: '~1.6 GB'
-  }
-] as const
-
-export function getWhisperModelInfo(id: string): WhisperModelInfo | undefined {
-  return WHISPER_MODELS.find((m) => m.id === id)
-}
 
 export const CAPTION_PRESETS: Record<string, CaptionStyle> = {
   'hormozi-bold': {
@@ -210,8 +191,11 @@ interface AppState {
   mediaOverlays: { meat: string | null; cta: string | null }
   setMediaOverlay: (bucket: 'meat' | 'cta', path: string | null) => void
 
-  // Whisper model
+  // Whisper capability and model preference
+  whisperDevice: WhisperDeviceState
   whisperModel: string
+  preferredWhisperModel: string | null
+  initializeWhisperDevice: (device: WhisperDevice) => void
   setWhisperModel: (model: string) => void
 
   // Caption offset
@@ -278,6 +262,8 @@ function writeLocalSetting(key: string, value: string): void {
   }
 }
 
+const savedWhisperModel = readLocalSetting('batchedit-whisper-model')
+
 function serializeProject(state: AppState): string {
   return JSON.stringify({
     version: 1,
@@ -318,10 +304,17 @@ export const useStore = create<AppState>((set, get) => ({
   setTargetPlatform: (platform) => set({ targetPlatform: platform, isDirty: true }),
   templateLayout: DEFAULT_TEMPLATE_LAYOUT,
   mediaOverlays: { meat: null, cta: null },
-  whisperModel: readLocalSetting('batchedit-whisper-model') || 'onnx-community/whisper-large-v3-turbo_timestamped',
+  whisperDevice: 'detecting',
+  whisperModel: WASM_DEFAULT_WHISPER_MODEL,
+  preferredWhisperModel: savedWhisperModel,
+  initializeWhisperDevice: (device) =>
+    set((state) => ({
+      whisperDevice: device,
+      whisperModel: resolveWhisperModel(device, state.preferredWhisperModel)
+    })),
   setWhisperModel: (model) => {
     writeLocalSetting('batchedit-whisper-model', model)
-    set({ whisperModel: model })
+    set({ whisperModel: model, preferredWhisperModel: model })
   },
   captionOffsetMs: 0,
   setCaptionOffsetMs: (ms) => set({ captionOffsetMs: ms, isDirty: true }),

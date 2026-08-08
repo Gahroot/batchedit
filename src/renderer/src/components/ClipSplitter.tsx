@@ -16,10 +16,12 @@ import {
   Wrench,
   Check,
   ChevronsRightLeft,
-  ChevronsLeftRight
+  ChevronsLeftRight,
+  Square
 } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import { useWhisper, WhisperChunk } from '@/hooks/useWhisper'
+import { isWhisperCancellationError, WhisperCancellationError } from '@/hooks/whisper-client'
 import { detectMarkers, DetectedMarker } from '../../../shared/marker-detection'
 import { useStore, BucketType, Clip, ClipQaResult, WordChunk } from '../store'
 import { cn } from '@/lib/utils'
@@ -28,6 +30,7 @@ import { Input } from '@/components/ui/input'
 import { Progress } from '@/components/ui/progress'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
+import { WhisperModelControl } from './WhisperModelControl'
 import {
   Dialog,
   DialogContent,
@@ -274,10 +277,12 @@ export function ClipSplitter() {
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const dropRef = useRef<HTMLDivElement>(null)
+  const transcriptionRunId = useRef(0)
 
-  const { loadModel, transcribe, isModelLoading, isModelReady, loadProgress } = useWhisper()
+  const { loadModel, transcribe, cancel, isModelLoading, loadProgress } = useWhisper()
   const addClips = useStore((s) => s.addClips)
   const whisperModel = useStore((s) => s.whisperModel)
+  const whisperDevice = useStore((s) => s.whisperDevice)
 
   // Reset state when dialog closes
   useEffect(() => {
@@ -303,59 +308,103 @@ export function ClipSplitter() {
     }
   }, [open])
 
-  const handleFile = useCallback(async (filePath: string) => {
-    try {
-      setVideoPath(filePath)
-      const meta = await window.api.getMetadata(filePath)
-      setVideoDuration(meta.duration)
-      setStep('transcribing')
-      await runTranscription(filePath, meta.duration)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }, [])
-
-  const runTranscription = async (path: string, duration: number) => {
-    let wavPath: string | null = null
-    try {
-      if (!isModelReady) {
-        await loadModel(whisperModel)
+  const runTranscription = useCallback(
+    async (path: string, duration: number, runId: number): Promise<{
+      chunks: WhisperChunk[]
+      detectedMarkers: DetectedMarker[]
+    }> => {
+      let wavPath: string | null = null
+      const assertCurrentRun = (): void => {
+        if (transcriptionRunId.current !== runId) throw new WhisperCancellationError()
       }
-      wavPath = await window.api.extractAudio(path)
-      const audioBuffer = await window.api.readAudioBuffer(wavPath)
-      wavPath = null
-      const audioData = new Float32Array(audioBuffer)
-      const { chunks, speechIntervals } = await transcribe(audioData, whisperModel)
-      setWordChunks(chunks)
 
-      const detected = detectMarkers(chunks, duration, speechIntervals)
-      setMarkers(detected)
-      setStep('review')
-    } catch (err) {
-      if (wavPath) await window.api.releaseTempFile(wavPath)
-      setError(err instanceof Error ? err.message : String(err))
-      setStep('upload')
-    }
-  }
+      try {
+        await loadModel(whisperModel)
+        assertCurrentRun()
+        wavPath = await window.api.extractAudio(path)
+        assertCurrentRun()
+        const audioBuffer = await window.api.readAudioBuffer(wavPath)
+        wavPath = null
+        assertCurrentRun()
+        const audioData = new Float32Array(audioBuffer)
+        const { chunks, speechIntervals } = await transcribe(audioData, whisperModel)
+        assertCurrentRun()
+        return {
+          chunks,
+          detectedMarkers: detectMarkers(chunks, duration, speechIntervals)
+        }
+      } finally {
+        if (wavPath) await window.api.releaseTempFile(wavPath)
+      }
+    },
+    [loadModel, transcribe, whisperModel]
+  )
+
+  const handleFile = useCallback(
+    async (filePath: string): Promise<void> => {
+      if (whisperDevice === 'detecting') return
+
+      const runId = transcriptionRunId.current + 1
+      transcriptionRunId.current = runId
+      setError(null)
+      try {
+        setVideoPath(filePath)
+        const meta = await window.api.getMetadata(filePath)
+        if (transcriptionRunId.current !== runId) throw new WhisperCancellationError()
+        setVideoDuration(meta.duration)
+        setStep('transcribing')
+        const result = await runTranscription(filePath, meta.duration, runId)
+        if (transcriptionRunId.current !== runId) throw new WhisperCancellationError()
+        setWordChunks(result.chunks)
+        setMarkers(result.detectedMarkers)
+        setStep('review')
+      } catch (error) {
+        if (!isWhisperCancellationError(error) && transcriptionRunId.current === runId) {
+          setError(error instanceof Error ? error.message : String(error))
+        }
+        if (transcriptionRunId.current === runId) setStep('upload')
+      }
+    },
+    [runTranscription, whisperDevice]
+  )
+
+  const stopTranscription = useCallback((): void => {
+    transcriptionRunId.current += 1
+    cancel()
+    setError(null)
+    setStep('upload')
+    setVideoPath(null)
+    setVideoDuration(0)
+  }, [cancel])
+
+  const handleOpenChange = useCallback(
+    (nextOpen: boolean): void => {
+      if (!nextOpen && videoPath !== null) stopTranscription()
+      setOpen(nextOpen)
+    },
+    [stopTranscription, videoPath]
+  )
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault()
+      if (whisperDevice === 'detecting') return
       const file = e.dataTransfer.files[0]
       if (file) {
         const filePath = window.api.getPathForFile(file)
         handleFile(filePath)
       }
     },
-    [handleFile]
+    [handleFile, whisperDevice]
   )
 
-  const handleBrowse = useCallback(async () => {
+  const handleBrowse = useCallback(async (): Promise<void> => {
+    if (whisperDevice === 'detecting') return
     const paths = await window.api.openFiles()
     if (paths.length > 0) {
       handleFile(paths[0])
     }
-  }, [handleFile])
+  }, [handleFile, whisperDevice])
 
   const seekVideo = useCallback((time: number) => {
     if (videoRef.current) {
@@ -602,7 +651,7 @@ export function ClipSplitter() {
   }, [alsoAddToBuckets, skippedCount, runPush])
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm" className="gap-1.5">
           <Scissors className="w-4 h-4" />
@@ -632,27 +681,39 @@ export function ClipSplitter() {
 
         {/* Upload Step */}
         {step === 'upload' && (
-          <div
-            ref={dropRef}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={handleDrop}
-            className="flex flex-col items-center justify-center gap-4 border-2 border-dashed border-border rounded-lg p-12 cursor-pointer hover:border-primary/50 transition-colors"
-            onClick={handleBrowse}
-          >
-            <Upload className="w-12 h-12 text-muted-foreground" />
-            <div className="text-center">
-              <p className="text-sm font-medium">Drop a video file here</p>
-              <p className="text-xs text-muted-foreground mt-1">
-                or click to browse. Record all hooks/meats/CTAs in one take with spoken markers like
-                &quot;hook one&quot;, &quot;meat two&quot;.
-              </p>
+          <div className="space-y-4">
+            <WhisperModelControl className="rounded-md border border-border p-3" />
+            <div
+              ref={dropRef}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={handleDrop}
+              className={cn(
+                'flex flex-col items-center justify-center gap-4 border-2 border-dashed border-border rounded-lg p-12 transition-colors',
+                whisperDevice === 'detecting'
+                  ? 'cursor-not-allowed opacity-60'
+                  : 'cursor-pointer hover:border-primary/50'
+              )}
+              onClick={() => void handleBrowse()}
+            >
+              <Upload className="w-12 h-12 text-muted-foreground" />
+              <div className="text-center">
+                <p className="text-sm font-medium">Drop a video file here</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  or click to browse. Record all hooks/meats/CTAs in one take with spoken markers
+                  like &quot;hook one&quot;, &quot;meat two&quot;.
+                </p>
+              </div>
             </div>
           </div>
         )}
 
         {/* Transcribing Step */}
         {step === 'transcribing' && (
-          <div className="flex flex-col items-center justify-center gap-4 py-12">
+          <div className="flex flex-col items-center justify-center gap-4 py-8">
+            <WhisperModelControl
+              disabled
+              className="w-full max-w-md rounded-md border border-border p-3"
+            />
             <Loader2 className="w-10 h-10 animate-spin text-primary" />
             <div className="text-center">
               {isModelLoading ? (
@@ -670,6 +731,10 @@ export function ClipSplitter() {
                 </>
               )}
             </div>
+            <Button variant="destructive" size="sm" onClick={stopTranscription}>
+              <Square className="w-3 h-3 fill-current" />
+              Stop transcription
+            </Button>
           </div>
         )}
 

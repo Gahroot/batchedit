@@ -1,8 +1,9 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, X, Type, FileVideo, Sparkles, Loader2, Image, Pencil, AlertTriangle } from 'lucide-react'
+import { Plus, X, Type, FileVideo, Sparkles, Loader2, Image, Pencil, AlertTriangle, Square } from 'lucide-react'
 import { useStore, BucketType, Clip } from '../store'
 import { useWhisper } from '../hooks/useWhisper'
+import { isWhisperCancellationError, WhisperCancellationError } from '../hooks/whisper-client'
 import { cn } from '../lib/utils'
 import { v4 as uuidv4 } from 'uuid'
 import { Card, CardHeader, CardContent } from '@/components/ui/card'
@@ -21,6 +22,7 @@ import { SortableContext, verticalListSortingStrategy, arrayMove } from '@dnd-ki
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers'
 import { SortableClip } from './SortableClip'
 import { ClipEditor } from './ClipEditor'
+import { WhisperModelControl } from './WhisperModelControl'
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -41,10 +43,15 @@ function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
   const addError = useStore((s) => s.addError)
   const isRendering = useStore((s) => s.isRendering)
   const hookTextProgress = useStore((s) => s.hookTextProgress)
-  const { loadModel, transcribe } = useWhisper()
+  const whisperModel = useStore((s) => s.whisperModel)
+  const whisperDevice = useStore((s) => s.whisperDevice)
+  const { loadModel, transcribe, cancel } = useWhisper()
+  const generationRunId = useRef(0)
   const [isGenerating, setIsGenerating] = useState(false)
 
-  const handleGenerate = async () => {
+  const handleGenerate = async (): Promise<void> => {
+    if (whisperDevice === 'detecting') return
+
     if (!geminiApiKey) {
       const message = 'Add your Gemini API key in the top settings bar to generate hook text.'
       toast.error(message)
@@ -52,30 +59,36 @@ function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
       return
     }
 
-    const emptyClips = clips.filter((c) => !hookTexts[c.id]?.trim())
+    const emptyClips = clips.filter((clip) => !hookTexts[clip.id]?.trim())
     if (emptyClips.length === 0) return
 
+    const runId = generationRunId.current + 1
+    generationRunId.current = runId
     setIsGenerating(true)
     const total = emptyClips.length
+    const assertCurrentRun = (): void => {
+      if (generationRunId.current !== runId) throw new WhisperCancellationError()
+    }
 
     try {
-      // Load Whisper model
       setHookTextProgress({ stage: 'loading-model', currentClip: '', completedClips: 0, totalClips: total })
-      await loadModel()
+      await loadModel(whisperModel)
+      assertCurrentRun()
 
       for (let i = 0; i < emptyClips.length; i++) {
         const clip = emptyClips[i]
-
         let wavPath: string | null = null
+
         try {
-          // Transcribe
           setHookTextProgress({ stage: 'transcribing', currentClip: clip.name, completedClips: i, totalClips: total })
           wavPath = await window.api.extractAudio(clip.path)
+          assertCurrentRun()
           const audioBuffer = await window.api.readAudioBuffer(wavPath)
           wavPath = null
-          const float32 = new Float32Array(audioBuffer)
-          const { chunks } = await transcribe(float32)
-          const transcript = chunks.map((c) => c.text).join(' ').trim()
+          assertCurrentRun()
+          const { chunks } = await transcribe(new Float32Array(audioBuffer), whisperModel)
+          assertCurrentRun()
+          const transcript = chunks.map((chunk) => chunk.text).join(' ').trim()
 
           if (!transcript) {
             addError({ source: 'hooktext', clipName: clip.name, message: 'Empty transcript — skipping' })
@@ -83,25 +96,38 @@ function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
             continue
           }
 
-          // Generate hook text via Gemini
           setHookTextProgress({ stage: 'generating', currentClip: clip.name, completedClips: i, totalClips: total })
           const hookText = await window.api.generateHookText(geminiApiKey, transcript)
+          assertCurrentRun()
           setHookText(clip.id, hookText)
-        } catch (err) {
-          if (wavPath) await window.api.releaseTempFile(wavPath)
-          const message = err instanceof Error ? err.message : String(err)
+        } catch (error) {
+          if (isWhisperCancellationError(error)) throw error
+          const message = error instanceof Error ? error.message : String(error)
           addError({ source: 'hooktext', clipName: clip.name, message })
           toast.error(`Hook text failed for ${clip.name}`, { description: message })
+        } finally {
+          if (wavPath) await window.api.releaseTempFile(wavPath)
         }
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      addError({ source: 'hooktext', clipName: 'Whisper', message })
-      toast.error('Hook text generation failed', { description: message })
+    } catch (error) {
+      if (!isWhisperCancellationError(error)) {
+        const message = error instanceof Error ? error.message : String(error)
+        addError({ source: 'hooktext', clipName: 'Whisper', message })
+        toast.error('Hook text generation failed', { description: message })
+      }
     } finally {
-      setHookTextProgress(null)
-      setIsGenerating(false)
+      if (generationRunId.current === runId) {
+        setHookTextProgress(null)
+        setIsGenerating(false)
+      }
     }
+  }
+
+  const stopGeneration = (): void => {
+    generationRunId.current += 1
+    cancel()
+    setHookTextProgress(null)
+    setIsGenerating(false)
   }
 
   return (
@@ -109,18 +135,21 @@ function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
-            variant="secondary"
+            variant={isGenerating ? 'destructive' : 'secondary'}
             size="sm"
-            onClick={handleGenerate}
-            disabled={isRendering || isGenerating || clips.length === 0}
+            onClick={isGenerating ? stopGeneration : () => void handleGenerate()}
+            disabled={
+              isRendering ||
+              (!isGenerating && (clips.length === 0 || whisperDevice === 'detecting'))
+            }
             className="h-7 text-xs gap-1"
           >
-            {isGenerating || hookTextProgress ? (
-              <Loader2 className="w-3 h-3 animate-spin" />
+            {isGenerating ? (
+              <Square className="w-3 h-3 fill-current" />
             ) : (
               <Sparkles className="w-3 h-3" />
             )}
-            Generate
+            {isGenerating ? 'Stop' : 'Generate'}
           </Button>
         </TooltipTrigger>
         <TooltipContent>Auto-generate hook text with AI (Whisper + Gemini)</TooltipContent>
@@ -290,6 +319,14 @@ export function Bucket({ type, label, color }: BucketProps) {
           </Button>
         </div>
       </CardHeader>
+
+      {type === 'hook' && (
+        <WhisperModelControl
+          compact
+          disabled={isRendering || hookTextProgress !== null}
+          className="px-4 py-2 border-b border-border bg-secondary/20"
+        />
+      )}
 
       {/* Media overlay thumbnail */}
       {type !== 'hook' && mediaOverlays[type as 'meat' | 'cta'] && (

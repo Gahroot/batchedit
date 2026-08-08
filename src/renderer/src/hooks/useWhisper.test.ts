@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { WhisperClient } from './whisper-client'
+import { isWhisperCancellationError, WhisperClient } from './whisper-client'
+import { WASM_DEFAULT_WHISPER_MODEL } from '../lib/whisper-config'
 
 type MessageHandler = (event: MessageEvent) => void
 
@@ -65,7 +66,9 @@ describe('WhisperClient — initial state', () => {
       isModelLoading: false,
       isModelReady: false,
       isTranscribing: false,
-      loadProgress: 0
+      loadProgress: 0,
+      loadingModel: null,
+      loadedModel: null
     })
   })
 })
@@ -152,7 +155,7 @@ describe('WhisperClient — loadModel', () => {
     expect(worker.postMessage).toHaveBeenCalledWith({
       type: 'load',
       requestId: 'whisper-test-request-id-1',
-      data: { model: undefined }
+      data: { model: WASM_DEFAULT_WHISPER_MODEL }
     })
 
     worker.simulateMessage({ type: 'status', status: 'ready' })
@@ -215,7 +218,7 @@ describe('WhisperClient — transcribe', () => {
     expect(worker.postMessage).toHaveBeenCalledWith({
       type: 'transcribe',
       requestId: 'whisper-test-request-id-1',
-      data: { audio, model: undefined }
+      data: { audio, model: WASM_DEFAULT_WHISPER_MODEL }
     })
 
     worker.simulateMessage({ type: 'result', chunks: [], speechIntervals: [] })
@@ -299,5 +302,77 @@ describe('WhisperClient — transcribe', () => {
     worker.simulateMessage({ type: 'result', requestId: 'whisper-test-request-id-2', chunks: currentChunks })
 
     await expect(currentTranscription).resolves.toEqual({ chunks: currentChunks, speechIntervals: [] })
+  })
+})
+
+describe('WhisperClient — cancellation and retry', () => {
+  it('cancels an in-flight model load and resets loading state', async () => {
+    const { client, worker } = createWhisperClientHarness()
+    const loadPromise = client.loadModel()
+
+    expect(client.cancel()).toBe(true)
+
+    let cancellation: unknown
+    try {
+      await loadPromise
+    } catch (error) {
+      cancellation = error
+    }
+    expect(isWhisperCancellationError(cancellation)).toBe(true)
+    expect(worker.postMessage).toHaveBeenLastCalledWith({
+      type: 'cancel',
+      requestIds: ['whisper-test-request-id-1']
+    })
+    expect(worker.terminate).toHaveBeenCalledOnce()
+    expect(client.getSnapshot()).toEqual({
+      isModelLoading: false,
+      isModelReady: false,
+      isTranscribing: false,
+      loadProgress: 0,
+      loadingModel: null,
+      loadedModel: null
+    })
+  })
+
+  it('cancels transcription through the same shared control', async () => {
+    const { client, worker } = createWhisperClientHarness()
+    const transcriptionPromise = client.transcribe(new Float32Array([0.1]))
+
+    expect(client.cancel()).toBe(true)
+
+    await expect(transcriptionPromise).rejects.toMatchObject({
+      name: 'WhisperCancellationError'
+    })
+    expect(client.getSnapshot().isTranscribing).toBe(false)
+    expect(worker.terminate).toHaveBeenCalledOnce()
+  })
+
+  it('creates a fresh worker and succeeds when retried after cancellation', async () => {
+    const firstWorker = new MockWorker()
+    const retryWorker = new MockWorker()
+    const workers = [firstWorker, retryWorker]
+    let workerIndex = 0
+    const createWorker = vi.fn(() => {
+      const worker = workers[workerIndex]
+      workerIndex += 1
+      if (!worker) throw new Error('Unexpected worker creation')
+      return worker as unknown as Worker
+    })
+    const client = new WhisperClient(createWorker)
+
+    const canceledLoad = client.loadModel()
+    client.cancel()
+    await expect(canceledLoad).rejects.toMatchObject({ name: 'WhisperCancellationError' })
+
+    const retryLoad = client.loadModel()
+    retryWorker.simulateMessage({ type: 'status', status: 'ready' })
+
+    await expect(retryLoad).resolves.toBeUndefined()
+    expect(createWorker).toHaveBeenCalledTimes(2)
+    expect(client.getSnapshot()).toMatchObject({
+      isModelLoading: false,
+      isModelReady: true,
+      loadedModel: WASM_DEFAULT_WHISPER_MODEL
+    })
   })
 })

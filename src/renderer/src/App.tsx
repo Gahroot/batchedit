@@ -17,6 +17,7 @@ import { NumberTicker } from '@/components/ui/number-ticker'
 import { FFmpegBanner } from './components/FFmpegBanner'
 import { FirstRunGuide } from './components/FirstRunGuide'
 import { useQaTranscribeBridge } from './hooks/useQaTranscribeBridge'
+import { detectWhisperDevice } from './lib/whisper-config'
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -29,6 +30,21 @@ function App() {
   const loadProject = useStore((s) => s.loadProject)
   const activeProjectPath = useStore((s) => s.activeProjectPath)
   const isDirty = useStore((s) => s.isDirty)
+  const initializeWhisperDevice = useStore((s) => s.initializeWhisperDevice)
+
+  useEffect(() => {
+    let active = true
+
+    const initialize = async (): Promise<void> => {
+      const device = await detectWhisperDevice()
+      if (active) initializeWhisperDevice(device)
+    }
+
+    void initialize()
+    return () => {
+      active = false
+    }
+  }, [initializeWhisperDevice])
 
   useEffect(() => {
     return window.api.onProjectCloseRequested(() => {

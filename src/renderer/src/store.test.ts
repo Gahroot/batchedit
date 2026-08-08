@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useStore, RESOLUTIONS, type Clip, type BucketType } from './store'
+import {
+  LARGE_WHISPER_MODEL,
+  WASM_DEFAULT_WHISPER_MODEL,
+  WEBGPU_DEFAULT_WHISPER_MODEL,
+  WHISPER_DEVICE
+} from './lib/whisper-config'
 
 // Mock uuid to return predictable IDs
 vi.mock('uuid', () => ({
@@ -509,6 +515,42 @@ describe('Zustand store', () => {
       })
       useStore.getState().setGeminiApiKey('local-key')
       expect(useStore.getState().isDirty).toBe(false)
+    })
+  })
+
+  describe('Whisper capability defaults', () => {
+    beforeEach(() => {
+      useStore.setState({
+        whisperDevice: 'detecting',
+        whisperModel: WASM_DEFAULT_WHISPER_MODEL,
+        preferredWhisperModel: null
+      })
+    })
+
+    it('selects Whisper Base after WASM capability detection', () => {
+      useStore.getState().initializeWhisperDevice(WHISPER_DEVICE.WASM)
+
+      expect(useStore.getState()).toMatchObject({
+        whisperDevice: WHISPER_DEVICE.WASM,
+        whisperModel: WASM_DEFAULT_WHISPER_MODEL
+      })
+    })
+
+    it('selects the balanced WebGPU default without opting into Large', () => {
+      useStore.getState().initializeWhisperDevice(WHISPER_DEVICE.WEBGPU)
+
+      expect(useStore.getState().whisperModel).toBe(WEBGPU_DEFAULT_WHISPER_MODEL)
+      expect(useStore.getState().whisperModel).not.toBe(LARGE_WHISPER_MODEL)
+    })
+
+    it('honors an explicit Large preference only when WebGPU is available', () => {
+      useStore.setState({ preferredWhisperModel: LARGE_WHISPER_MODEL })
+
+      useStore.getState().initializeWhisperDevice(WHISPER_DEVICE.WASM)
+      expect(useStore.getState().whisperModel).toBe(WASM_DEFAULT_WHISPER_MODEL)
+
+      useStore.getState().initializeWhisperDevice(WHISPER_DEVICE.WEBGPU)
+      expect(useStore.getState().whisperModel).toBe(LARGE_WHISPER_MODEL)
     })
   })
 

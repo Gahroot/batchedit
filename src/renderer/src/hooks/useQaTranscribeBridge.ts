@@ -4,7 +4,7 @@ import { useWhisper } from './useWhisper'
 
 /** Runs boundary-QA transcription requests in the renderer's Whisper pipeline. */
 export function useQaTranscribeBridge(): void {
-  const { loadModel, transcribe } = useWhisper()
+  const { loadModel, transcribe, cancel } = useWhisper()
   const whisperModel = useStore((state) => state.whisperModel)
 
   useEffect(() => {
@@ -13,6 +13,7 @@ export function useQaTranscribeBridge(): void {
 
     const unsubscribeCancel = window.api.qaBridge.onTranscribeCancel(({ id }) => {
       cancelledRequestIds.add(id)
+      cancel()
     })
 
     const unsubscribe = window.api.qaBridge.onTranscribeRequest(async (request) => {
@@ -59,5 +60,5 @@ export function useQaTranscribeBridge(): void {
       unsubscribe()
       unsubscribeCancel()
     }
-  }, [loadModel, transcribe, whisperModel])
+  }, [cancel, loadModel, transcribe, whisperModel])
 }

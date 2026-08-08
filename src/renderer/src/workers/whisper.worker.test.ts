@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
+import { LARGE_WHISPER_MODEL } from '../lib/whisper-config'
 import { getWhisperAsrOptions, normalizeTranscriptionChunks } from './whisper.worker'
 
 describe('getWhisperAsrOptions', () => {
@@ -24,6 +25,46 @@ describe('getWhisperAsrOptions', () => {
       num_beams: 1,
       language: 'english'
     })
+  })
+})
+
+describe('Whisper worker device boundary', () => {
+  it('rejects Whisper Large on WASM before starting a model download', async () => {
+    const originalGpuDescriptor = Object.getOwnPropertyDescriptor(navigator, 'gpu')
+    Object.defineProperty(navigator, 'gpu', { configurable: true, value: undefined })
+    const postMessage = vi.spyOn(self, 'postMessage').mockImplementation(() => undefined)
+
+    try {
+      const messageHandler = self.onmessage
+      if (!messageHandler) throw new Error('Whisper worker message handler was not registered')
+
+      await messageHandler.call(
+        self,
+        new MessageEvent('message', {
+          data: {
+            type: 'load',
+            requestId: 'large-on-wasm',
+            data: { model: LARGE_WHISPER_MODEL }
+          }
+        })
+      )
+
+      expect(postMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          type: 'status',
+          status: 'error',
+          requestId: 'large-on-wasm',
+          error: expect.stringContaining('requires WebGPU')
+        })
+      )
+    } finally {
+      postMessage.mockRestore()
+      if (originalGpuDescriptor) {
+        Object.defineProperty(navigator, 'gpu', originalGpuDescriptor)
+      } else {
+        Reflect.deleteProperty(navigator, 'gpu')
+      }
+    }
   })
 })
 

@@ -1,10 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, Loader2, Captions, Crop, Scissors, Brain, Square } from 'lucide-react'
-import { useStore, RenderProgress, WHISPER_MODELS, getWhisperModelInfo } from '../store'
+import { Play, Loader2, Captions, Crop, Scissors, Square } from 'lucide-react'
+import { useStore, RenderProgress } from '../store'
+import { getWhisperModelInfo } from '../lib/whisper-config'
 import { humanizeFfmpegError } from '../../../shared/ffmpeg-error-hints'
 import { useWhisper } from '@/hooks/useWhisper'
+import { isWhisperCancellationError, WhisperCancellationError } from '@/hooks/whisper-client'
 import { WhisperStatus } from './WhisperStatus'
+import { WhisperModelControl } from './WhisperModelControl'
 import { ErrorLog } from './ErrorLog'
 import { CaptionStylePicker } from './CaptionStylePicker'
 import { v4 as uuidv4 } from 'uuid'
@@ -54,20 +57,29 @@ export function RenderPanel() {
   const autoTrimSilence = useStore((s) => s.autoTrimSilence)
   const setAutoTrimSilence = useStore((s) => s.setAutoTrimSilence)
   const whisperModel = useStore((s) => s.whisperModel)
-  const setWhisperModel = useStore((s) => s.setWhisperModel)
+  const whisperDevice = useStore((s) => s.whisperDevice)
   const captionOffsetMs = useStore((s) => s.captionOffsetMs)
   const setCaptionOffsetMs = useStore((s) => s.setCaptionOffsetMs)
   const targetPlatform = useStore((s) => s.targetPlatform)
   const setOutputDirectory = useStore((s) => s.setOutputDirectory)
 
-  const { loadModel, transcribe, isModelLoading, isModelReady, isTranscribing, loadProgress } =
-    useWhisper()
+  const {
+    loadModel,
+    transcribe,
+    cancel: cancelWhisper,
+    isModelLoading,
+    isModelReady,
+    isTranscribing,
+    loadProgress,
+    loadedModel
+  } = useWhisper()
 
   const [renderCount, setRenderCount] = useState<number | 'all'>('all')
   const [autoCaptions, setAutoCaptions] = useState(false)
   const [autoResize, setAutoResize] = useState(false)
   const [showProgress, setShowProgress] = useState(false)
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null)
+  const captionPreparationRunId = useRef(0)
 
   // Listen for render progress updates
   useEffect(() => {
@@ -97,9 +109,13 @@ export function RenderPanel() {
     if (dir) setOutputDirectory(dir)
   }
 
-  const handleRender = async () => {
+  const handleRender = async (): Promise<void> => {
     if (totalCombos === 0) {
       toast.error('Add at least one Hook, Meat, and CTA')
+      return
+    }
+    if (autoCaptions && whisperDevice === 'detecting') {
+      toast.error('Wait for the WebGPU check to finish')
       return
     }
     if (!settings.outputDirectory) {
@@ -110,6 +126,14 @@ export function RenderPanel() {
         }
       })
       return
+    }
+
+    const preparationRunId = captionPreparationRunId.current + 1
+    captionPreparationRunId.current = preparationRunId
+    const assertCurrentPreparation = (): void => {
+      if (captionPreparationRunId.current !== preparationRunId) {
+        throw new WhisperCancellationError()
+      }
     }
 
     setIsRendering(true)
@@ -136,9 +160,10 @@ export function RenderPanel() {
     const toRender = renderCount === 'all' ? combos : combos.slice(0, renderCount)
 
     if (autoCaptions) {
-      // Load model first — if this fails, skip all captions
-      let modelLoaded = isModelReady
-      if (!modelLoaded) {
+      try {
+        let modelLoaded = true
+        const selectedModelWasReady = isModelReady && loadedModel === whisperModel
+
         try {
           setCaptionProgress({
             stage: 'loading-model',
@@ -147,65 +172,87 @@ export function RenderPanel() {
             totalClips: 0
           })
           await loadModel(whisperModel)
-          modelLoaded = true
-          toast.success('Whisper model ready')
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          console.error('Whisper model loading failed:', err)
-          addError({ source: 'caption', clipName: 'Whisper Model', message: msg })
-          // Turn the switch OFF so the UI never claims captions are on while
-          // rendering proceeds caption-less. The user can re-enable and retry.
+          assertCurrentPreparation()
+          if (!selectedModelWasReady) toast.success('Whisper model ready')
+        } catch (error) {
+          if (isWhisperCancellationError(error)) throw error
+
+          modelLoaded = false
+          const message = error instanceof Error ? error.message : String(error)
+          console.error('Whisper model loading failed:', error)
+          addError({ source: 'caption', clipName: 'Whisper Model', message })
           setAutoCaptions(false)
           toast.error('Whisper model failed to load — Auto Captions turned off', {
             description: 'Rendering without captions. Re-enable Auto Captions to try again.'
           })
           setCaptionProgress(null)
         }
-      }
 
-      if (modelLoaded) {
-        // Only transcribe clips used by the combos we're about to render
-        const allClipPaths = new Set<string>()
-        for (const combo of toRender) {
-          allClipPaths.add(combo.hook.path)
-          allClipPaths.add(combo.meat.path)
-          allClipPaths.add(combo.cta.path)
-        }
-
-        const uniquePaths = Array.from(allClipPaths)
-        let completed = 0
-
-        // Transcribe each unique clip independently
-        for (const clipPath of uniquePaths) {
-          const clipName = clipPath.split(/[/\\]/).pop() || 'Unknown'
-          setCaptionProgress({
-            stage: 'transcribing',
-            currentClip: clipName,
-            completedClips: completed,
-            totalClips: uniquePaths.length
-          })
-
-          let wavPath: string | null = null
-          try {
-            wavPath = await window.api.extractAudio(clipPath)
-            const audioBuffer = await window.api.readAudioBuffer(wavPath)
-            wavPath = null
-            const audioData = new Float32Array(audioBuffer)
-            const { chunks } = await transcribe(audioData, whisperModel)
-            transcriptionCache[clipPath] = chunks
-          } catch (err) {
-            if (wavPath) await window.api.releaseTempFile(wavPath)
-            const msg = err instanceof Error ? err.message : String(err)
-            console.error(`Transcription failed for ${clipName}:`, err)
-            addError({ source: 'caption', clipName, message: msg })
+        if (modelLoaded) {
+          const allClipPaths = new Set<string>()
+          for (const combo of toRender) {
+            allClipPaths.add(combo.hook.path)
+            allClipPaths.add(combo.meat.path)
+            allClipPaths.add(combo.cta.path)
           }
 
-          completed++
+          const uniquePaths = Array.from(allClipPaths).sort()
+          let completed = 0
+
+          for (const clipPath of uniquePaths) {
+            assertCurrentPreparation()
+            const clipName = clipPath.split(/[/\\]/).pop() || 'Unknown'
+            setCaptionProgress({
+              stage: 'transcribing',
+              currentClip: clipName,
+              completedClips: completed,
+              totalClips: uniquePaths.length
+            })
+
+            let wavPath: string | null = null
+            try {
+              wavPath = await window.api.extractAudio(clipPath)
+              assertCurrentPreparation()
+              const audioBuffer = await window.api.readAudioBuffer(wavPath)
+              wavPath = null
+              assertCurrentPreparation()
+              const { chunks } = await transcribe(new Float32Array(audioBuffer), whisperModel)
+              assertCurrentPreparation()
+              transcriptionCache[clipPath] = chunks
+            } catch (error) {
+              if (isWhisperCancellationError(error)) throw error
+              const message = error instanceof Error ? error.message : String(error)
+              console.error(`Transcription failed for ${clipName}:`, error)
+              addError({ source: 'caption', clipName, message })
+            } finally {
+              if (wavPath) await window.api.releaseTempFile(wavPath)
+            }
+
+            completed += 1
+          }
+
+          if (completed > 0) {
+            toast.success(`Transcribed ${completed} clip${completed === 1 ? '' : 's'}`)
+          }
+        }
+        assertCurrentPreparation()
+      } catch (error) {
+        if (isWhisperCancellationError(error)) {
+          if (captionPreparationRunId.current === preparationRunId) {
+            setCaptionProgress(null)
+            setIsRendering(false)
+            toast.info('Caption preparation stopped')
+          }
+          return
         }
 
-        if (completed > 0) {
-          toast.success(`Transcribed ${completed} clip${completed === 1 ? '' : 's'}`)
-        }
+        const message = error instanceof Error ? error.message : String(error)
+        addError({ source: 'caption', clipName: 'Caption preparation', message })
+        setAutoCaptions(false)
+        setCaptionProgress(null)
+        toast.error('Caption preparation failed — rendering without captions', {
+          description: message
+        })
       }
     }
 
@@ -271,6 +318,8 @@ export function RenderPanel() {
         return job
       })
     )
+
+    if (autoCaptions && captionPreparationRunId.current !== preparationRunId) return
 
     const batchId = jobs[0]?.id ?? null
     setActiveBatchId(batchId)
@@ -366,7 +415,11 @@ export function RenderPanel() {
       ? Math.round(renderProgress.reduce((sum, r) => sum + r.percent, 0) / total)
       : 0
 
-  const canRender = totalCombos > 0 && settings.outputDirectory && !isRendering
+  const canRender =
+    totalCombos > 0 &&
+    settings.outputDirectory &&
+    !isRendering &&
+    (!autoCaptions || whisperDevice !== 'detecting')
 
   // Exact reason the Render button is disabled (excluding the in-progress state),
   // surfaced via tooltip so first-run users know what to fix.
@@ -375,13 +428,22 @@ export function RenderPanel() {
       ? 'Add at least one Hook, Meat, and CTA'
       : !settings.outputDirectory
         ? 'Choose an output folder first'
-        : null
+        : autoCaptions && whisperDevice === 'detecting'
+          ? 'Checking WebGPU before selecting the caption model'
+          : null
 
-  const handleCancelRender = async () => {
-    const didCancel = await window.api.cancelRender(activeBatchId ?? undefined)
-    if (didCancel) {
-      toast.info('Canceling render...')
+  const handleCancelRender = async (): Promise<void> => {
+    if (activeBatchId === null && captionProgress !== null) {
+      captionPreparationRunId.current += 1
+      cancelWhisper()
+      setCaptionProgress(null)
+      setIsRendering(false)
+      toast.info('Stopping caption preparation…')
+      return
     }
+
+    const didCancel = await window.api.cancelRender(activeBatchId ?? undefined)
+    if (didCancel) toast.info('Canceling render...')
   }
 
   // Build render count options
@@ -431,7 +493,7 @@ export function RenderPanel() {
       {autoCaptions && (
         <WhisperStatus
           isLoading={isModelLoading}
-          isReady={isModelReady}
+          isReady={isModelReady && loadedModel === whisperModel}
           loadProgress={loadProgress}
           isTranscribing={isTranscribing}
           currentClip={captionProgress?.currentClip}
@@ -479,29 +541,11 @@ export function RenderPanel() {
             <span className="text-muted-foreground">Auto Captions</span>
           </label>
 
-          {/* Caption Style Picker + Model Picker (visible when auto captions enabled) */}
+          {/* Caption controls (visible when auto captions are enabled) */}
           {autoCaptions && (
             <>
               <CaptionStylePicker disabled={isRendering} />
-              <div className="flex items-center gap-1">
-                <Brain className="w-3.5 h-3.5 text-muted-foreground" />
-                <Select
-                  value={whisperModel}
-                  onValueChange={setWhisperModel}
-                  disabled={isRendering}
-                >
-                  <SelectTrigger className="h-7 w-auto text-xs gap-1 px-2">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {WHISPER_MODELS.map((m) => (
-                      <SelectItem key={m.id} value={m.id}>
-                        {m.label} · {m.approxSize}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              <WhisperModelControl compact disabled={isRendering} className="w-72" />
               <div className="flex items-center gap-1">
                 <span className="text-[10px] text-muted-foreground whitespace-nowrap">
                   {captionOffsetMs > 0 ? '+' : ''}{captionOffsetMs}ms
@@ -580,8 +624,8 @@ export function RenderPanel() {
           )}
           {isRendering && (
             <Button size="lg" variant="destructive" onClick={handleCancelRender}>
-              <Square className="w-4 h-4" />
-              Cancel
+              <Square className="w-4 h-4 fill-current" />
+              {captionProgress ? 'Stop captions' : 'Cancel render'}
             </Button>
           )}
         </div>
