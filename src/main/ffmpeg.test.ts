@@ -1,5 +1,8 @@
+import { randomUUID } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
-import { parseSilenceEnd, parseSilenceStart } from './ffmpeg'
+import { detectSilenceBounds, parseSilenceEnd, parseSilenceStart, setupFFmpeg } from './ffmpeg'
 
 describe('parseSilenceEnd', () => {
   it('extracts silence_end from a valid FFmpeg line', () => {
@@ -49,5 +52,14 @@ describe('parseSilenceStart', () => {
   it('returns null for non-matching lines', () => {
     expect(parseSilenceStart('frame= 100 fps=30 q=28.0 size= 256kB')).toBeNull()
     expect(parseSilenceStart('')).toBeNull()
+  })
+})
+
+describe('detectSilenceBounds', () => {
+  it('rejects an FFmpeg command failure instead of reporting no silence', async () => {
+    setupFFmpeg()
+    const missingInput = join(tmpdir(), `batchedit-missing-${randomUUID()}.mp4`)
+
+    await expect(detectSilenceBounds(missingInput)).rejects.toThrow()
   })
 })
