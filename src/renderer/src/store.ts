@@ -224,6 +224,7 @@ interface AppState {
   setClipTranscript: (clipId: string, transcript: WordChunk[]) => void
   updateClipTranscriptWord: (clipId: string, wordIndex: number, newText: string) => void
   updateClipPath: (bucket: BucketType, clipId: string, newPath: string, newDuration: number, thumbnail?: string) => void
+  markClipPathsMissing: (paths: string[]) => void
   setResolution: (resolution: ProjectSettings['resolution']) => void
   setOutputDirectory: (dir: string) => void
   setRenderProgress: (progress: RenderProgress[]) => void
@@ -422,6 +423,18 @@ export const useStore = create<AppState>((set, get) => ({
             : clip
         ),
         isDirty: true
+      }
+    }),
+
+  markClipPathsMissing: (paths) =>
+    set((state) => {
+      const missingPaths = new Set(paths)
+      const markMissing = (clips: Clip[]): Clip[] =>
+        clips.map((clip) => missingPaths.has(clip.path) ? { ...clip, missing: true } : clip)
+      return {
+        hooks: markMissing(state.hooks),
+        meats: markMissing(state.meats),
+        ctas: markMissing(state.ctas)
       }
     }),
 

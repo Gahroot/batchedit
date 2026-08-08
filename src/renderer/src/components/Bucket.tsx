@@ -44,6 +44,7 @@ import {
 } from '@/components/ui/context-menu'
 import { BlurText } from '@/components/ui/blur-text'
 import { toast } from 'sonner'
+import { humanizeFfmpegError } from '../../../shared/ffmpeg-error-hints'
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.mts', '.m4v']
 
@@ -209,38 +210,61 @@ export function Bucket({ type, label, color }: BucketProps) {
         const result = await window.api.trimLeadingSilence(path)
         finalPath = result.outputPath
       } catch {
-        // Fall back to untrimmed
+        // Fall back to the original source when optional silence trimming fails.
       }
     }
+
     const name = finalPath.split(/[/\\]/).pop() || path.split(/[/\\]/).pop() || 'Unknown'
-    const [meta, thumbnail] = await Promise.all([
-      window.api.getMetadata(finalPath).catch(() => ({ duration: 0 })),
+    const [metadata, thumbnail] = await Promise.all([
+      window.api.getMetadata(finalPath),
       window.api.getThumbnail(finalPath).catch(() => undefined)
     ])
-    if (!meta.duration || meta.duration <= 0) {
-      const message = `Couldn't read ${name} — file may be unsupported or corrupt`
-      addError({ source: 'ingest', clipName: name, message })
-      toast.error(message)
+    if (!Number.isFinite(metadata.duration) || metadata.duration <= 0) {
+      throw new Error('Metadata probe returned no positive video duration')
     }
-    return { id: uuidv4(), path: finalPath, name, duration: meta.duration, thumbnail }
-  }, [autoTrimSilence, addError])
 
-  const handleAddClips = useCallback(async () => {
-    const filePaths = await window.api.openFiles()
-    if (!filePaths || filePaths.length === 0) return
+    return { id: uuidv4(), path: finalPath, name, duration: metadata.duration, thumbnail }
+  }, [autoTrimSilence])
 
+  const reportRejectedClip = useCallback((path: string, error: unknown): void => {
+    const name = path.split(/[/\\]/).pop() || 'Unknown'
+    const detail = error instanceof Error ? error.message : String(error)
+    const { hint, raw } = humanizeFfmpegError(detail, 'Metadata probe failed')
+    const message = `Import rejected. ${hint}`
+    addError({ source: 'ingest', clipName: name, message, detail: raw })
+    toast.error(`Couldn't add ${name}`, { description: hint })
+  }, [addError])
+
+  const importClipPaths = useCallback(async (filePaths: string[]): Promise<void> => {
     setIsProcessing(true)
     try {
-      const newClips = await Promise.all(filePaths.map(processClip))
-      addClips(type, newClips)
-    } catch (err) {
-      toast.error('Failed to add clips', {
-        description: err instanceof Error ? err.message : String(err)
-      })
+      const outcomes = await Promise.all(filePaths.map(async (path) => {
+        try {
+          return { ok: true as const, clip: await processClip(path) }
+        } catch (error) {
+          return { ok: false as const, path, error }
+        }
+      }))
+      const validClips = outcomes.flatMap((outcome) => outcome.ok ? [outcome.clip] : [])
+      for (const outcome of outcomes) {
+        if (!outcome.ok) reportRejectedClip(outcome.path, outcome.error)
+      }
+      if (validClips.length > 0) addClips(type, validClips)
     } finally {
       setIsProcessing(false)
     }
-  }, [type, addClips, processClip])
+  }, [type, addClips, processClip, reportRejectedClip])
+
+  const handleAddClips = useCallback(async (): Promise<void> => {
+    try {
+      const filePaths = await window.api.openFiles()
+      if (filePaths.length > 0) await importClipPaths(filePaths)
+    } catch (error) {
+      toast.error('Could not open the file picker', {
+        description: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }, [importClipPaths])
 
   const handleRelinkClip = useCallback(async (clip: Clip): Promise<void> => {
     if (isRendering) return
@@ -294,33 +318,24 @@ export function Bucket({ type, label, color }: BucketProps) {
         e.preventDefault(); e.stopPropagation(); setIsDragOver(false)
         if (isRendering) return
         const files = Array.from(e.dataTransfer.files)
-        const videoFiles = files.filter((f) =>
-          VIDEO_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext))
+        const videoFiles = files.filter((file) =>
+          VIDEO_EXTS.some((ext) => file.name.toLowerCase().endsWith(ext))
         )
-        const skipped = files.length - videoFiles.length
-        if (skipped > 0) {
-          toast.warning(`${skipped} file${skipped === 1 ? '' : 's'} skipped (unsupported format)`)
+        const unsupportedFiles = files.filter((file) => !videoFiles.includes(file))
+        for (const file of unsupportedFiles) {
+          const message = 'Unsupported format. Convert the file to MP4, MOV, AVI, MKV, WebM, MTS, or M4V and add it again.'
+          addError({ source: 'ingest', clipName: file.name, message })
+          toast.error(`Couldn't add ${file.name}`, { description: message })
         }
-        const videoPaths = videoFiles.map((f) => window.api.getPathForFile(f))
-        if (videoPaths.length === 0) return
-        setIsProcessing(true)
-        try {
-          const newClips = await Promise.all(videoPaths.map(processClip))
-          addClips(type, newClips)
-        } catch (err) {
-          toast.error('Failed to add clips', {
-            description: err instanceof Error ? err.message : String(err)
-          })
-        } finally {
-          setIsProcessing(false)
-        }
+        const videoPaths = videoFiles.map((file) => window.api.getPathForFile(file))
+        if (videoPaths.length > 0) await importClipPaths(videoPaths)
       }}
     >
       {/* Processing spinner overlay */}
       {isProcessing && (
         <div className="flex items-center gap-2 px-4 py-1.5 border-b border-border bg-primary/5 text-xs text-muted-foreground">
           <Loader2 className="w-3 h-3 animate-spin text-primary" />
-          <span>Trimming silence…</span>
+          <span>Checking clips…</span>
         </div>
       )}
 

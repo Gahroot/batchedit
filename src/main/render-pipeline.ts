@@ -395,9 +395,14 @@ async function preNormalizeClip(
   }
 }
 
+interface ClipNormalizationBatch {
+  normalizedPaths: Map<string, string>
+  failures: Map<string, Error>
+}
+
 /**
  * Pre-normalize all unique clips in parallel.
- * Returns a Map from original path to normalized path.
+ * Source failures are collected independently so one bad clip cannot stop unrelated jobs.
  */
 async function preNormalizeAllClips(
   clipPaths: string[],
@@ -405,21 +410,32 @@ async function preNormalizeAllClips(
   autoResize: boolean,
   onProgress: (completed: number, total: number) => void,
   cancellation: RenderCancellationState
-): Promise<Map<string, string>> {
+): Promise<ClipNormalizationBatch> {
   const uniquePaths = [...new Set(clipPaths)]
-  const result = new Map<string, string>()
+  const normalizedPaths = new Map<string, string>()
+  const failures = new Map<string, Error>()
   let completed = 0
   const queue = [...uniquePaths]
 
   async function processNext(): Promise<void> {
     throwIfCanceled(cancellation)
     const clipPath = queue.shift()
-    if (!clipPath) return
+    if (clipPath === undefined) return
 
-    const normalized = await preNormalizeClip(clipPath, resolution, autoResize, cancellation)
-    result.set(clipPath, normalized)
-    completed++
-    onProgress(completed, uniquePaths.length)
+    try {
+      const normalized = await preNormalizeClip(clipPath, resolution, autoResize, cancellation)
+      normalizedPaths.set(clipPath, normalized)
+    } catch (error) {
+      const normalizationError = toRenderError(error)
+      if (normalizationError instanceof RenderCanceledError || cancellation.isCanceled) {
+        throw normalizationError
+      }
+      failures.set(clipPath, normalizationError)
+      console.error(`[Normalize] Failed source: ${clipPath}\n${normalizationError.message}`)
+    } finally {
+      completed++
+      onProgress(completed, uniquePaths.length)
+    }
 
     await processNext()
   }
@@ -430,7 +446,7 @@ async function preNormalizeAllClips(
   )
   await Promise.all(workers)
 
-  return result
+  return { normalizedPaths, failures }
 }
 
 /**
@@ -939,6 +955,10 @@ export function setupRenderPipeline(): void {
         status: 'queued' as const
       }))
       const sendProgress = createProgressSender(event.sender, results)
+      if (jobs.length === 0) {
+        activeRenderBatches.delete(batchId)
+        return results
+      }
 
       // Create output directory
       if (jobs.length > 0) {
@@ -959,9 +979,9 @@ export function setupRenderPipeline(): void {
       const resolution = jobs[0].resolution
       const autoResize = jobs[0].autoResize || false
 
-      let normalizedMap: Map<string, string>
+      let normalizationBatch: ClipNormalizationBatch
       try {
-        normalizedMap = await preNormalizeAllClips(
+        normalizationBatch = await preNormalizeAllClips(
           allClipPaths,
           resolution,
           autoResize,
@@ -993,6 +1013,36 @@ export function setupRenderPipeline(): void {
         return results
       }
 
+      const normalizedMap = normalizationBatch.normalizedPaths
+      const normalizationFailures = normalizationBatch.failures
+      const runnableJobs = jobs.filter((job) => {
+        const failedPaths = [...new Set([job.hookPath, job.meatPath, job.ctaPath])]
+          .filter((clipPath) => normalizationFailures.has(clipPath))
+        if (failedPaths.length === 0) return true
+
+        let primaryError = new Error('Source normalization failed')
+        for (const failedPath of failedPaths) {
+          const failure = normalizationFailures.get(failedPath)
+          if (failure) {
+            primaryError = failure
+            break
+          }
+        }
+        const humanized = humanizeFfmpegError(primaryError.message, 'Normalization failed')
+        const failedNames = failedPaths.map((clipPath) => basename(clipPath)).join(', ')
+        const progress = results.find((result) => result.jobId === job.id)
+        if (progress) {
+          progress.status = 'error'
+          progress.percent = 100
+          progress.error = `Couldn't prepare ${failedNames}. ${humanized.hint}`
+          progress.errorDetail = failedPaths
+            .map((clipPath) => `${clipPath}: ${normalizationFailures.get(clipPath)?.message ?? 'Unknown normalization error'}`)
+            .join('\n')
+        }
+        return false
+      })
+      if (normalizationFailures.size > 0) sendProgress({ force: true })
+
       // --- Phase 1.5: Probe normalized durations, fix overlay timing, generate ASS ---
       const probedDurations = new Map<string, number>()
       try {
@@ -1006,7 +1056,7 @@ export function setupRenderPipeline(): void {
           }
         }
 
-        for (const job of jobs) {
+        for (const job of runnableJobs) {
           throwIfCanceled(cancellation)
           // Fix overlay timing with probed durations
         const probedHookDur = probedDurations.get(job.hookPath)
@@ -1044,8 +1094,10 @@ export function setupRenderPipeline(): void {
           throw error
         }
         for (const r of results) {
-          r.status = 'canceled'
-          r.error = 'Render canceled'
+          if (r.status !== 'error') {
+            r.status = 'canceled'
+            r.error = 'Render canceled'
+          }
         }
         sendProgress({ force: true })
         activeRenderBatches.delete(batchId)
@@ -1055,15 +1107,17 @@ export function setupRenderPipeline(): void {
 
       // Reset progress for rendering phase
       for (const r of results) {
-        r.status = 'queued'
-        r.percent = 0
+        if (r.status !== 'error') {
+          r.status = 'queued'
+          r.percent = 0
+        }
       }
       sendProgress({ force: true })
 
       // --- Phase 2: Render each combination ---
       // Split into fast (stream copy, I/O bound) and slow (encoding) queues
-      const fastQueue = jobs.filter((j) => !jobNeedsOverlays(j))
-      const slowQueue = jobs.filter((j) => jobNeedsOverlays(j))
+      const fastQueue = runnableJobs.filter((job) => !jobNeedsOverlays(job))
+      const slowQueue = runnableJobs.filter((job) => jobNeedsOverlays(job))
 
       async function renderJob(job: RenderJob): Promise<void> {
         const idx = jobs.findIndex((j) => j.id === job.id)

@@ -93,7 +93,13 @@ export function ErrorLog() {
                       variant="outline"
                       className="text-[9px] px-1 py-0 shrink-0 font-mono border-destructive/40"
                     >
-                      {entry.source === 'caption' ? 'CAP' : entry.source === 'hooktext' ? 'AI' : 'REN'}
+                      {entry.source === 'caption'
+                        ? 'CAP'
+                        : entry.source === 'hooktext'
+                          ? 'AI'
+                          : entry.source === 'ingest'
+                            ? 'ING'
+                            : 'REN'}
                     </Badge>
                     <span className="text-muted-foreground shrink-0 font-mono">
                       {formatTime(entry.timestamp)}

@@ -34,6 +34,10 @@ import {
 } from '@/components/ui/tooltip'
 import { toast } from 'sonner'
 import confetti from 'canvas-confetti'
+import {
+  findKnownClipPreflightIssues,
+  runRenderClipPreflight
+} from '../lib/render-preflight'
 
 export function RenderPanel() {
   const hooks = useStore((s) => s.hooks)
@@ -62,6 +66,7 @@ export function RenderPanel() {
   const setCaptionOffsetMs = useStore((s) => s.setCaptionOffsetMs)
   const targetPlatform = useStore((s) => s.targetPlatform)
   const setOutputDirectory = useStore((s) => s.setOutputDirectory)
+  const markClipPathsMissing = useStore((s) => s.markClipPathsMissing)
 
   const {
     loadModel,
@@ -114,6 +119,36 @@ export function RenderPanel() {
       toast.error('Add at least one Hook, Meat, and CTA')
       return
     }
+
+    const clipPreflight = await runRenderClipPreflight(
+      [...hooks, ...meats, ...ctas],
+      window.api.pathsExist
+    )
+    if (!clipPreflight.ok) {
+      if ('issues' in clipPreflight) {
+        const missingPaths = clipPreflight.issues
+          .filter((issue) => issue.kind === 'missing')
+          .map((issue) => issue.clip.path)
+        if (missingPaths.length > 0) markClipPathsMissing(missingPaths)
+        for (const issue of clipPreflight.issues) {
+          addError({ source: 'render', clipName: issue.clip.name, message: issue.message })
+        }
+        const clipNames = clipPreflight.issues.map((issue) => issue.clip.name).join(', ')
+        toast.error('Render blocked by invalid source clips', {
+          description: `${clipNames}. Relink, re-add, or remove each flagged clip and try again.`
+        })
+      } else {
+        addError({
+          source: 'render',
+          clipName: 'Preflight',
+          message: clipPreflight.checkError,
+          detail: clipPreflight.detail
+        })
+        toast.error('Render preflight failed', { description: clipPreflight.checkError })
+      }
+      return
+    }
+
     if (autoCaptions && whisperDevice === 'detecting') {
       toast.error('Wait for the WebGPU check to finish')
       return
@@ -415,9 +450,11 @@ export function RenderPanel() {
       ? Math.round(renderProgress.reduce((sum, r) => sum + r.percent, 0) / total)
       : 0
 
+  const knownClipIssues = findKnownClipPreflightIssues([...hooks, ...meats, ...ctas])
   const canRender =
     totalCombos > 0 &&
-    settings.outputDirectory &&
+    Boolean(settings.outputDirectory) &&
+    knownClipIssues.length === 0 &&
     !isRendering &&
     (!autoCaptions || whisperDevice !== 'detecting')
 
@@ -426,11 +463,13 @@ export function RenderPanel() {
   const disabledReason =
     totalCombos === 0
       ? 'Add at least one Hook, Meat, and CTA'
-      : !settings.outputDirectory
-        ? 'Choose an output folder first'
-        : autoCaptions && whisperDevice === 'detecting'
-          ? 'Checking WebGPU before selecting the caption model'
-          : null
+      : knownClipIssues.length > 0
+        ? `Relink, re-add, or remove ${knownClipIssues.length} missing or invalid clip${knownClipIssues.length === 1 ? '' : 's'} before rendering`
+        : !settings.outputDirectory
+          ? 'Choose an output folder first'
+          : autoCaptions && whisperDevice === 'detecting'
+            ? 'Checking WebGPU before selecting the caption model'
+            : null
 
   const handleCancelRender = async (): Promise<void> => {
     if (activeBatchId === null && captionProgress !== null) {
