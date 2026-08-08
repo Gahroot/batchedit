@@ -330,7 +330,7 @@ export function detectSilenceBounds(
   noiseDb = -40,
   minDuration = 0.1
 ): Promise<SilenceBounds> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const nullDev = process.platform === 'win32' ? 'NUL' : '/dev/null'
     let firstSilenceStart: number | null = null
     let leadingEnd = 0
@@ -361,7 +361,7 @@ export function detectSilenceBounds(
         }
       })
       .on('end', () => resolve({ leadingEnd, lastSilenceStart, lastSilenceEnd }))
-      .on('error', () => resolve({ leadingEnd: 0, lastSilenceStart: null, lastSilenceEnd: null }))
+      .on('error', (error) => reject(error))
       .run()
   })
 }

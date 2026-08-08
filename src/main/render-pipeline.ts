@@ -8,6 +8,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { clampToSafeZone, getElementPlacement, CANVAS_WIDTH, CANVAS_HEIGHT, type Platform } from './safe-zones'
 import { humanizeFfmpegError } from '../shared/ffmpeg-error-hints'
 import { createManagedMediaPath } from './generated-media'
+import { captureTrimLeadingSilenceResult } from './trim-silence-result'
 
 function getFontsDir(): string {
   if (app.isPackaged) {
@@ -871,19 +872,28 @@ export function setupRenderPipeline(): void {
   ipcMain.handle(
     'ffmpeg:trimLeadingSilence',
     async (_event, videoPath: string, outputDir?: string) => {
-      const runId = uuidv4()
-      const sourceName = basename(videoPath, extname(videoPath))
-      const fileName = `${sourceName}-trimmed.mp4`
-      const outPath = outputDir && outputDir.length > 0
-        ? join(outputDir, `batchedit-trimmed-${runId}.mp4`)
-        : createManagedMediaPath({
-            userDataPath: app.getPath('userData'),
-            operation: 'silence-trim',
-            fileName,
-            runId
-          })
-      if (outputDir) mkdirSync(outputDir, { recursive: true })
-      return trimLeadingSilence(videoPath, outPath)
+      const startedAt = Date.now()
+      const result = await captureTrimLeadingSilenceResult(async () => {
+        const runId = uuidv4()
+        const sourceName = basename(videoPath, extname(videoPath))
+        const fileName = `${sourceName}-trimmed.mp4`
+        const outPath = outputDir && outputDir.length > 0
+          ? join(outputDir, `batchedit-trimmed-${runId}.mp4`)
+          : createManagedMediaPath({
+              userDataPath: app.getPath('userData'),
+              operation: 'silence-trim',
+              fileName,
+              runId
+            })
+        if (outputDir) mkdirSync(outputDir, { recursive: true })
+        return trimLeadingSilence(videoPath, outPath)
+      })
+      console.info('[Silence trim]', {
+        videoPath,
+        outcome: result.outcome,
+        elapsedMs: Date.now() - startedAt
+      })
+      return result
     }
   )
 

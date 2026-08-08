@@ -2,6 +2,17 @@ export type BucketType = 'hook' | 'meat' | 'cta'
 
 export type Platform = 'tiktok' | 'reels' | 'shorts' | 'universal'
 
+export type TrimLeadingSilenceResult =
+  | {
+      outcome: 'trim-success'
+      outputPath: string
+      trimmedSeconds: number
+    }
+  | {
+      outcome: 'trim-failure'
+      error: string
+    }
+
 export interface WordChunk {
   text: string
   start: number

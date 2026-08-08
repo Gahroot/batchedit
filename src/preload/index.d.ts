@@ -1,4 +1,5 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
+import type { TrimLeadingSilenceResult } from '../shared/types'
 
 type Platform = 'tiktok' | 'reels' | 'shorts' | 'universal'
 type BucketType = 'hook' | 'meat' | 'cta'
@@ -166,7 +167,7 @@ interface Api {
   onSplitProgress: (callback: (progress: { completed: number; total: number }) => void) => () => void
   trimVideoReencode: (videoPath: string, outputDir: string | null, startTime: number, endTime: number) => Promise<string>
   detectLeadingSilence: (videoPath: string) => Promise<number>
-  trimLeadingSilence: (videoPath: string, outputDir?: string) => Promise<{ outputPath: string; trimmedSeconds: number }>
+  trimLeadingSilence: (videoPath: string, outputDir?: string) => Promise<TrimLeadingSilenceResult>
   generateHookText: (apiKey: string, transcript: string) => Promise<string>
   saveProject: (projectData: string, activeProjectPath: string | null) => Promise<string | null>
   loadProject: () => Promise<{ path: string; data: string } | null>

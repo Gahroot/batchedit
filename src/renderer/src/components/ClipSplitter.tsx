@@ -500,7 +500,9 @@ export function ClipSplitter() {
               r.outputPath,
               outputDir ?? undefined
             )
-            return { ...r, outputPath: trimResult.outputPath }
+            return trimResult.outcome === 'trim-success'
+              ? { ...r, outputPath: trimResult.outputPath }
+              : r
           } catch {
             return r
           }

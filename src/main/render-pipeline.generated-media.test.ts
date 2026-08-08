@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   trimVideo: vi.fn(async () => undefined),
   trimLeadingSilence: vi.fn(async (_sourcePath: string, outputPath: string) => ({
     outputPath,
-    trimStart: 0
+    trimmedSeconds: 0.25
   })),
   trimVideoReencode: vi.fn(async (_sourcePath: string, outputPath: string) => outputPath),
   testRoot: '',
@@ -121,5 +121,22 @@ describe('generated media render handlers', () => {
       0,
       1
     )
+  })
+
+  it('returns distinct success and failure outcomes from the silence-trim IPC handler', async () => {
+    const sourcePath = join(tmpdir(), 'source.mp4')
+    const handler = getHandler('ffmpeg:trimLeadingSilence')
+
+    await expect(handler({}, sourcePath)).resolves.toEqual({
+      outcome: 'trim-success',
+      outputPath: expect.stringContaining(join(mocks.userDataPath, 'media', 'silence-trim')),
+      trimmedSeconds: 0.25
+    })
+
+    mocks.trimLeadingSilence.mockRejectedValueOnce(new Error('encoder failed'))
+    await expect(handler({}, sourcePath)).resolves.toEqual({
+      outcome: 'trim-failure',
+      error: 'encoder failed'
+    })
   })
 })

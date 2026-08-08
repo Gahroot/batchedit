@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import { PROJECT_CLOSE_CHANNELS, type ProjectCloseAction } from '../shared/project-close'
+import type { TrimLeadingSilenceResult } from '../shared/types'
 
 const api = {
   // File dialogs
@@ -60,7 +61,7 @@ const api = {
   // Silence trimming
   detectLeadingSilence: (videoPath: string) =>
     ipcRenderer.invoke('ffmpeg:detectLeadingSilence', videoPath),
-  trimLeadingSilence: (videoPath: string, outputDir?: string) =>
+  trimLeadingSilence: (videoPath: string, outputDir?: string): Promise<TrimLeadingSilenceResult> =>
     ipcRenderer.invoke('ffmpeg:trimLeadingSilence', videoPath, outputDir),
 
   // AI

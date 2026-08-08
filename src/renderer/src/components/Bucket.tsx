@@ -61,8 +61,20 @@ import {
 import { BlurText } from '@/components/ui/blur-text'
 import { toast } from 'sonner'
 import { humanizeFfmpegError } from '../../../shared/ffmpeg-error-hints'
+import {
+  fileNameFromPath,
+  importedClipFromOutcome,
+  summarizeClipImports,
+  type ClipImportOutcome
+} from '../clip-import-outcome'
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.mts', '.m4v']
+
+interface ClipMetadata {
+  duration: number
+}
+
+type TrimFailureChoice = 'retry' | 'use-original' | 'cancel'
 
 function GenerateHookTextButton({ clips }: { clips: Clip[] }) {
   const geminiApiKey = useStore((s) => s.geminiApiKey)
@@ -261,31 +273,118 @@ export function Bucket({ type, label, color }: BucketProps) {
     }
   }, [clips, label])
 
-  const processClip = useCallback(async (path: string): Promise<Clip> => {
-    let finalPath = path
-    if (autoTrimSilence) {
-      try {
-        const result = await window.api.trimLeadingSilence(path)
-        finalPath = result.outputPath
-      } catch {
-        // Fall back to the original source when optional silence trimming fails.
-      }
-    }
-
-    const name = finalPath.split(/[/\\]/).pop() || path.split(/[/\\]/).pop() || 'Unknown'
-    const [metadata, thumbnail] = await Promise.all([
-      window.api.getMetadata(finalPath),
-      window.api.getThumbnail(finalPath).catch(() => undefined)
-    ])
+  const getValidMetadata = useCallback(async (path: string): Promise<ClipMetadata> => {
+    const metadata = await window.api.getMetadata(path)
     if (!Number.isFinite(metadata.duration) || metadata.duration <= 0) {
       throw new Error('Metadata probe returned no positive video duration')
     }
+    return metadata
+  }, [])
 
-    return { id: uuidv4(), path: finalPath, name, duration: metadata.duration, thumbnail }
-  }, [autoTrimSilence])
+  const createClip = useCallback(async (
+    path: string,
+    name: string,
+    metadata: ClipMetadata
+  ): Promise<Clip> => {
+    const thumbnail = await window.api.getThumbnail(path).catch(() => undefined)
+    return { id: uuidv4(), path, name, duration: metadata.duration, thumbnail }
+  }, [])
+
+  const requestTrimFailureChoice = useCallback((
+    path: string,
+    error: unknown
+  ): Promise<TrimFailureChoice> => {
+    const name = fileNameFromPath(path)
+    const detail = error instanceof Error ? error.message : String(error)
+    const { hint, raw } = humanizeFfmpegError(detail, 'Silence trimming failed')
+    addError({
+      source: 'ingest',
+      clipName: name,
+      message: 'Silence trimming failed. Retry trimming or use the original clip.',
+      detail: raw
+    })
+
+    return new Promise((resolve) => {
+      let settled = false
+      const settle = (choice: TrimFailureChoice): void => {
+        if (settled) return
+        settled = true
+        resolve(choice)
+      }
+
+      toast.error(`Couldn't trim ${name}`, {
+        description: `${hint} Retry trimming, or use the original clip without trimming.`,
+        duration: Number.POSITIVE_INFINITY,
+        action: { label: 'Retry', onClick: () => settle('retry') },
+        cancel: { label: 'Use Original', onClick: () => settle('use-original') },
+        onDismiss: () => settle('cancel')
+      })
+    })
+  }, [addError])
+
+  const processClip = useCallback(async (path: string): Promise<ClipImportOutcome> => {
+    const sourceName = fileNameFromPath(path)
+    let sourceMetadata: ClipMetadata
+    try {
+      sourceMetadata = await getValidMetadata(path)
+    } catch (error) {
+      return { kind: 'metadata-failure', sourcePath: path, error }
+    }
+
+    if (!autoTrimSilence) {
+      return {
+        kind: 'added-original',
+        clip: await createClip(path, sourceName, sourceMetadata)
+      }
+    }
+
+    while (true) {
+      let trimError: unknown
+      try {
+        const result = await window.api.trimLeadingSilence(path)
+        if (result.outcome === 'trim-success') {
+          const validResult =
+            result.outputPath.length > 0 &&
+            Number.isFinite(result.trimmedSeconds) &&
+            result.trimmedSeconds >= 0 &&
+            (result.trimmedSeconds === 0 || result.outputPath !== path)
+          if (!validResult) {
+            trimError = new Error('Silence trimming returned an invalid result')
+          } else {
+            try {
+              const metadata = result.outputPath === path
+                ? sourceMetadata
+                : await getValidMetadata(result.outputPath)
+              const clip = await createClip(result.outputPath, sourceName, metadata)
+              return { kind: 'trim-success', clip, trimmedSeconds: result.trimmedSeconds }
+            } catch (error) {
+              if (result.outputPath !== path) {
+                await window.api.releaseTempFile(result.outputPath).catch(() => undefined)
+              }
+              return { kind: 'metadata-failure', sourcePath: path, error }
+            }
+          }
+        } else {
+          trimError = new Error(result.error || 'Silence trimming failed')
+        }
+      } catch (error) {
+        trimError = error
+      }
+
+      const choice = await requestTrimFailureChoice(path, trimError)
+      if (choice === 'retry') continue
+      if (choice === 'use-original') {
+        return {
+          kind: 'trim-fallback',
+          clip: await createClip(path, sourceName, sourceMetadata)
+        }
+      }
+      return { kind: 'cancelled', sourcePath: path }
+    }
+  }, [autoTrimSilence, createClip, getValidMetadata, requestTrimFailureChoice])
 
   const reportRejectedClip = useCallback((path: string, error: unknown): void => {
-    const name = path.split(/[/\\]/).pop() || 'Unknown'
+    const name = fileNameFromPath(path)
     const detail = error instanceof Error ? error.message : String(error)
     const { hint, raw } = humanizeFfmpegError(detail, 'Metadata probe failed')
     const message = `Import rejected. ${hint}`
@@ -293,25 +392,46 @@ export function Bucket({ type, label, color }: BucketProps) {
     toast.error(`Couldn't add ${name}`, { description: hint })
   }, [addError])
 
+  const showImportSummary = useCallback((outcomes: readonly ClipImportOutcome[]): void => {
+    const summary = summarizeClipImports(outcomes)
+    const options = { description: summary.description }
+    switch (summary.tone) {
+      case 'success':
+        toast.success(summary.title, options)
+        break
+      case 'warning':
+        toast.warning(summary.title, options)
+        break
+      case 'error':
+        toast.error(summary.title, options)
+        break
+    }
+  }, [])
+
   const importClipPaths = useCallback(async (filePaths: string[]): Promise<void> => {
     setIsProcessing(true)
     try {
-      const outcomes = await Promise.all(filePaths.map(async (path) => {
+      const outcomes = await Promise.all(filePaths.map(async (path): Promise<ClipImportOutcome> => {
         try {
-          return { ok: true as const, clip: await processClip(path) }
+          return await processClip(path)
         } catch (error) {
-          return { ok: false as const, path, error }
+          return { kind: 'metadata-failure', sourcePath: path, error }
         }
       }))
-      const validClips = outcomes.flatMap((outcome) => outcome.ok ? [outcome.clip] : [])
+      const importedClips = outcomes
+        .map(importedClipFromOutcome)
+        .filter((clip): clip is Clip => clip !== null)
       for (const outcome of outcomes) {
-        if (!outcome.ok) reportRejectedClip(outcome.path, outcome.error)
+        if (outcome.kind === 'metadata-failure') {
+          reportRejectedClip(outcome.sourcePath, outcome.error)
+        }
       }
-      if (validClips.length > 0) addClips(type, validClips)
+      if (importedClips.length > 0) addClips(type, importedClips)
+      showImportSummary(outcomes)
     } finally {
       setIsProcessing(false)
     }
-  }, [type, addClips, processClip, reportRejectedClip])
+  }, [type, addClips, processClip, reportRejectedClip, showImportSummary])
 
   const handleAddClips = useCallback(async (): Promise<void> => {
     try {
@@ -403,11 +523,11 @@ export function Bucket({ type, label, color }: BucketProps) {
         if (videoPaths.length > 0) await importClipPaths(videoPaths)
       }}
     >
-      {/* Processing spinner overlay */}
-      {isProcessing && (
+      {/* Silence-trimming progress is only shown when the option is enabled. */}
+      {isProcessing && autoTrimSilence && (
         <div className="flex items-center gap-2 px-4 py-1.5 border-b border-border bg-primary/5 text-xs text-muted-foreground">
           <Loader2 className="w-3 h-3 animate-spin text-primary" />
-          <span>Checking clips…</span>
+          <span>Trimming silence…</span>
         </div>
       )}
 
