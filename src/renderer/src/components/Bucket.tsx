@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Plus,
@@ -29,8 +29,24 @@ import {
   TooltipProvider,
   TooltipTrigger
 } from '@/components/ui/tooltip'
-import { DndContext, closestCenter, DragEndEvent } from '@dnd-kit/core'
-import { SortableContext, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type Announcements,
+  type DragEndEvent,
+  type ScreenReaderInstructions,
+  type UniqueIdentifier
+} from '@dnd-kit/core'
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy
+} from '@dnd-kit/sortable'
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers'
 import { SortableClip } from './SortableClip'
 import { ClipEditor } from './ClipEditor'
@@ -199,9 +215,51 @@ export function Bucket({ type, label, color }: BucketProps) {
   const [isProcessing, setIsProcessing] = useState(false)
   const [editingClipId, setEditingClipId] = useState<string | null>(null)
   const [relinkingClipId, setRelinkingClipId] = useState<string | null>(null)
+  const [moveAnnouncement, setMoveAnnouncement] = useState('')
   const overlayPath = type === 'hook' ? null : mediaOverlays[type]
   const overlayMissing = type === 'hook' ? false : missingMediaOverlays[type]
   const overlayButtonLabel = overlayMissing ? 'Relink' : overlayPath ? 'Replace' : 'Image'
+
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  )
+
+  const accessibility = useMemo<{
+    announcements: Announcements
+    screenReaderInstructions: ScreenReaderInstructions
+  }>(() => {
+    const getClipName = (id: UniqueIdentifier): string =>
+      clips.find((clip) => clip.id === id)?.name ?? 'Unknown clip'
+    const getPosition = (id: UniqueIdentifier): string => {
+      const index = clips.findIndex((clip) => clip.id === id)
+      return index >= 0 ? `position ${index + 1} of ${clips.length}` : 'an unknown position'
+    }
+
+    return {
+      announcements: {
+        onDragStart({ active }) {
+          return `Picked up ${getClipName(active.id)} in the ${label} bucket at ${getPosition(active.id)}.`
+        },
+        onDragOver({ active, over }) {
+          if (!over) {
+            return `${getClipName(active.id)} is not over a position in the ${label} bucket.`
+          }
+          return `Moved ${getClipName(active.id)} to ${getPosition(over.id)} in the ${label} bucket.`
+        },
+        onDragEnd({ active, over }) {
+          const position = over ? getPosition(over.id) : getPosition(active.id)
+          return `Dropped ${getClipName(active.id)} at ${position} in the ${label} bucket.`
+        },
+        onDragCancel({ active }) {
+          return `Cancelled moving ${getClipName(active.id)}. It remains at ${getPosition(active.id)} in the ${label} bucket.`
+        }
+      },
+      screenReaderInstructions: {
+        draggable: `To pick up a clip, press Space or Enter. While dragging, use the Up and Down Arrow keys to move it within the ${label} bucket. Press Space or Enter again to drop it, or Escape to cancel. Move Up and Move Down buttons are also available.`
+      }
+    }
+  }, [clips, label])
 
   const processClip = useCallback(async (path: string): Promise<Clip> => {
     let finalPath = path
@@ -300,13 +358,27 @@ export function Bucket({ type, label, color }: BucketProps) {
     setMediaOverlay(type as 'meat' | 'cta', filePaths[0])
   }, [type, setMediaOverlay])
 
-  const handleDragEnd = (event: DragEndEvent) => {
+  const handleDragEnd = (event: DragEndEvent): void => {
+    if (isRendering) return
     const { active, over } = event
     if (!over || active.id === over.id) return
-    const oldIndex = clips.findIndex((c) => c.id === active.id)
-    const newIndex = clips.findIndex((c) => c.id === over.id)
-    const reordered = arrayMove(clips, oldIndex, newIndex)
-    reorderClips(type, reordered)
+    const oldIndex = clips.findIndex((clip) => clip.id === active.id)
+    const newIndex = clips.findIndex((clip) => clip.id === over.id)
+    if (oldIndex < 0 || newIndex < 0) return
+    reorderClips(type, arrayMove(clips, oldIndex, newIndex))
+  }
+
+  const handleMoveClip = (clipId: string, offset: -1 | 1): void => {
+    if (isRendering) return
+    const oldIndex = clips.findIndex((clip) => clip.id === clipId)
+    const newIndex = oldIndex + offset
+    const clip = clips[oldIndex]
+    if (!clip || newIndex < 0 || newIndex >= clips.length) return
+
+    reorderClips(type, arrayMove(clips, oldIndex, newIndex))
+    setMoveAnnouncement(
+      `Moved ${clip.name} to position ${newIndex + 1} of ${clips.length} in the ${label} bucket.`
+    )
   }
 
   return (
@@ -456,6 +528,9 @@ export function Bucket({ type, label, color }: BucketProps) {
       <CardContent className="flex-1 p-0 overflow-hidden">
         <ScrollArea className="h-full">
           <div className="p-2 space-y-2">
+            <output className="sr-only" aria-live="polite" aria-atomic="true">
+              {moveAnnouncement}
+            </output>
             {clips.length === 0 ? (
               <AnimatePresence mode="popLayout">
                 <motion.div
@@ -477,10 +552,16 @@ export function Bucket({ type, label, color }: BucketProps) {
                 </motion.div>
               </AnimatePresence>
             ) : (
-              <DndContext collisionDetection={closestCenter} onDragEnd={handleDragEnd} modifiers={[restrictToVerticalAxis]}>
-                <SortableContext items={clips.map((c) => c.id)} strategy={verticalListSortingStrategy}>
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={handleDragEnd}
+                modifiers={[restrictToVerticalAxis]}
+                accessibility={accessibility}
+              >
+                <SortableContext items={clips.map((clip) => clip.id)} strategy={verticalListSortingStrategy}>
                   <AnimatePresence mode="popLayout">
-                    {clips.map((clip) => (
+                    {clips.map((clip, index) => (
                       <motion.div
                         key={clip.id}
                         layout
@@ -488,7 +569,16 @@ export function Bucket({ type, label, color }: BucketProps) {
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, x: -20 }}
                       >
-                        <SortableClip id={clip.id} disabled={isRendering}>
+                        <SortableClip
+                          id={clip.id}
+                          clipName={clip.name}
+                          bucketLabel={label}
+                          canMoveUp={index > 0}
+                          canMoveDown={index < clips.length - 1}
+                          onMoveUp={() => handleMoveClip(clip.id, -1)}
+                          onMoveDown={() => handleMoveClip(clip.id, 1)}
+                          disabled={isRendering}
+                        >
                           <ContextMenu>
                             <ContextMenuTrigger asChild>
                           <div
