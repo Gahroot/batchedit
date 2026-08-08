@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, Loader2, Captions, Crop, Scissors, Square } from 'lucide-react'
+import { Play, Loader2, Captions, Crop, Scissors, Square, FolderOpen } from 'lucide-react'
 import { useStore, RenderProgress } from '../store'
 import { getWhisperModelInfo } from '../lib/whisper-config'
 import { humanizeFfmpegError } from '../../../shared/ffmpeg-error-hints'
@@ -38,6 +38,17 @@ import {
   findKnownClipPreflightIssues,
   runRenderClipPreflight
 } from '../lib/render-preflight'
+
+type RenderJob = Parameters<Window['api']['renderBatch']>[0][number]
+
+interface BatchDestination {
+  directory: string
+  revealPath: string | null
+}
+
+function buildBatchOutputPath(batchDirectory: string, outputName: string): string {
+  return `${batchDirectory.replace(/[/\\]+$/, '')}/${outputName}`
+}
 
 export function RenderPanel() {
   const hooks = useStore((s) => s.hooks)
@@ -84,6 +95,7 @@ export function RenderPanel() {
   const [autoResize, setAutoResize] = useState(false)
   const [showProgress, setShowProgress] = useState(false)
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null)
+  const [batchDestination, setBatchDestination] = useState<BatchDestination | null>(null)
   const captionPreparationRunId = useRef(0)
 
   // Listen for render progress updates
@@ -153,7 +165,8 @@ export function RenderPanel() {
       toast.error('Wait for the WebGPU check to finish')
       return
     }
-    if (!settings.outputDirectory) {
+    const outputDirectory = settings.outputDirectory
+    if (!outputDirectory) {
       toast.error('Choose an output folder first', {
         action: {
           label: 'Choose Folder',
@@ -291,70 +304,76 @@ export function RenderPanel() {
       }
     }
 
-    // Build render jobs
-    const jobMap: Record<string, string> = {}
-    const jobs = await Promise.all(
-      toRender.map(async (combo, idx) => {
-        const id = uuidv4()
-        jobMap[id] = combo.id
-        const hookText = hookTexts[combo.hook.id]
-        const hookLabel = hookText && hookText.trim()
-          ? hookText.trim().replace(/[<>:"/\\|?*]+/g, '').replace(/\s+/g, ' ')
-          : combo.hook.name.replace(/\.[^.]+$/, '')
-        const outputName = `${hookLabel}_${combo.meat.name.replace(/\.[^.]+$/, '')}_${combo.cta.name.replace(/\.[^.]+$/, '')}_${idx + 1}.mp4`
-
-        const job: any = {
-          id,
-          hookPath: combo.hook.path,
-          meatPath: combo.meat.path,
-          ctaPath: combo.cta.path,
-          outputPath: `${settings.outputDirectory}/${outputName}`,
-          resolution: { width: settings.resolution.width, height: settings.resolution.height },
-          autoResize,
-          titlePosition: templateLayout.titleText,
-          targetPlatform
-        }
-
-        // Add text overlay if defined
-        if (hookText && hookText.trim()) {
-          job.textOverlay = hookText.trim()
-          job.hookDurationSec = combo.hook.duration
-        }
-
-        // Add media overlays if set
-        if (mediaOverlays.meat || mediaOverlays.cta) {
-          job.mediaOverlays = {
-            meat: mediaOverlays.meat || undefined,
-            cta: mediaOverlays.cta || undefined
-          }
-          job.mediaOverlayPosition = templateLayout.media
-          job.meatDurationSec = combo.meat.duration
-          // Ensure hookDurationSec is set for overlay timing
-          if (!job.hookDurationSec) {
-            job.hookDurationSec = combo.hook.duration
-          }
-        }
-
-        // Add caption data for main process to generate ASS after normalization
-        if (autoCaptions && Object.keys(transcriptionCache).length > 0) {
-          const { id: _id, label: _label, ...styleProps } = captionStyle
-          job.captionData = {
-            clipWordChunks: {
-              [combo.hook.path]: transcriptionCache[combo.hook.path] || [],
-              [combo.meat.path]: transcriptionCache[combo.meat.path] || [],
-              [combo.cta.path]: transcriptionCache[combo.cta.path] || [],
-            },
-            captionStyle: styleProps,
-            captionPosition: templateLayout.subtitles,
-            captionOffsetMs,
-          }
-        }
-
-        return job
-      })
-    )
-
     if (autoCaptions && captionPreparationRunId.current !== preparationRunId) return
+
+    let batchOutputDirectory: string
+    try {
+      batchOutputDirectory = await window.api.createRenderBatchDirectory(outputDirectory)
+      setBatchDestination({ directory: batchOutputDirectory, revealPath: null })
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error('Failed to create render batch directory:', error)
+      addError({ source: 'render', clipName: 'Batch destination', message })
+      setCaptionProgress(null)
+      setIsRendering(false)
+      toast.error("Couldn't create a new batch folder", { description: message })
+      return
+    }
+
+    // Build every result path inside the directory reserved for this render run.
+    const jobMap: Record<string, string> = {}
+    const jobs: RenderJob[] = toRender.map((combo, idx) => {
+      const id = uuidv4()
+      jobMap[id] = combo.id
+      const hookText = hookTexts[combo.hook.id]
+      const hookLabel = hookText && hookText.trim()
+        ? hookText.trim().replace(/[<>:"/\\|?*]+/g, '').replace(/\s+/g, ' ')
+        : combo.hook.name.replace(/\.[^.]+$/, '')
+      const outputName = `${hookLabel}_${combo.meat.name.replace(/\.[^.]+$/, '')}_${combo.cta.name.replace(/\.[^.]+$/, '')}_${idx + 1}.mp4`
+
+      const job: RenderJob = {
+        id,
+        hookPath: combo.hook.path,
+        meatPath: combo.meat.path,
+        ctaPath: combo.cta.path,
+        outputPath: buildBatchOutputPath(batchOutputDirectory, outputName),
+        resolution: { width: settings.resolution.width, height: settings.resolution.height },
+        autoResize,
+        titlePosition: templateLayout.titleText,
+        targetPlatform
+      }
+
+      if (hookText && hookText.trim()) {
+        job.textOverlay = hookText.trim()
+        job.hookDurationSec = combo.hook.duration
+      }
+
+      if (mediaOverlays.meat || mediaOverlays.cta) {
+        job.mediaOverlays = {
+          ...(mediaOverlays.meat ? { meat: mediaOverlays.meat } : {}),
+          ...(mediaOverlays.cta ? { cta: mediaOverlays.cta } : {})
+        }
+        job.mediaOverlayPosition = templateLayout.media
+        job.meatDurationSec = combo.meat.duration
+        if (!job.hookDurationSec) job.hookDurationSec = combo.hook.duration
+      }
+
+      if (autoCaptions && Object.keys(transcriptionCache).length > 0) {
+        const { id: _id, label: _label, ...styleProps } = captionStyle
+        job.captionData = {
+          clipWordChunks: {
+            [combo.hook.path]: transcriptionCache[combo.hook.path] || [],
+            [combo.meat.path]: transcriptionCache[combo.meat.path] || [],
+            [combo.cta.path]: transcriptionCache[combo.cta.path] || []
+          },
+          captionStyle: styleProps,
+          captionPosition: templateLayout.subtitles,
+          captionOffsetMs
+        }
+      }
+
+      return job
+    })
 
     const batchId = jobs[0]?.id ?? null
     setActiveBatchId(batchId)
@@ -404,25 +423,21 @@ export function RenderPanel() {
 
       const doneCount = finalProgress.filter((r) => r.status === 'done').length
       const totalJobs = finalProgress.length
+      const firstDoneJob = finalProgress.find((r) => r.status === 'done')
+      const firstFilePath = firstDoneJob
+        ? jobs.find((j) => j.id === firstDoneJob.jobId)?.outputPath ?? null
+        : null
+      setBatchDestination({ directory: batchOutputDirectory, revealPath: firstFilePath })
+
       if (totalJobs > 0 && canceledCount > 0) {
         toast.info(`Canceled ${canceledCount} render${canceledCount === 1 ? '' : 's'}`)
       } else if (totalJobs > 0 && errorCount === 0) {
-        const firstDoneJob = finalProgress.find((r) => r.status === 'done')
-        const firstFilePath = firstDoneJob
-          ? jobs.find((j) => j.id === firstDoneJob.jobId)?.outputPath
-          : undefined
-        const revealTarget = firstFilePath ?? settings.outputDirectory
         toast.success(`${doneCount} video${doneCount === 1 ? '' : 's'} rendered`, {
-          action: revealTarget
+          description: `Saved to ${batchOutputDirectory}`,
+          action: firstFilePath
             ? {
-                label: 'Open Folder',
-                onClick: () => {
-                  if (firstFilePath) {
-                    window.api.showItemInFolder(firstFilePath)
-                  } else if (settings.outputDirectory) {
-                    window.api.openPath(settings.outputDirectory)
-                  }
-                }
+                label: 'Reveal Output',
+                onClick: () => window.api.showItemInFolder(firstFilePath)
               }
             : undefined
         })
@@ -527,6 +542,37 @@ export function RenderPanel() {
 
       {/* Error Log */}
       <ErrorLog />
+
+      {batchDestination && (
+        <output className="mb-3 flex items-center gap-3 rounded-md border border-border bg-muted/40 px-3 py-2">
+          <FolderOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] font-medium text-muted-foreground">Batch destination</div>
+            <button
+              type="button"
+              title={batchDestination.directory}
+              className="block max-w-full truncate text-left text-xs text-foreground hover:underline"
+              onClick={() => window.api.openPath(batchDestination.directory)}
+            >
+              {batchDestination.directory}
+            </button>
+          </div>
+          {batchDestination.revealPath && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 shrink-0 text-xs"
+              onClick={() => {
+                const revealPath = batchDestination.revealPath
+                if (revealPath) window.api.showItemInFolder(revealPath)
+              }}
+            >
+              Reveal Output
+            </Button>
+          )}
+        </output>
+      )}
 
       {/* Whisper Status */}
       {autoCaptions && (

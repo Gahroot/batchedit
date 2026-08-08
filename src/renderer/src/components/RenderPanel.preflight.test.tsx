@@ -5,6 +5,7 @@ import { useStore, type Clip } from '../store'
 
 const mocks = vi.hoisted(() => ({
   pathsExist: vi.fn(),
+  createRenderBatchDirectory: vi.fn(),
   renderBatch: vi.fn(),
   toastError: vi.fn()
 }))
@@ -48,6 +49,7 @@ function installApi(): void {
     value: {
       onRenderProgress: () => () => {},
       pathsExist: mocks.pathsExist,
+      createRenderBatchDirectory: mocks.createRenderBatchDirectory,
       renderBatch: mocks.renderBatch
     } as unknown as Window['api']
   })
@@ -78,6 +80,7 @@ describe('RenderPanel source preflight', () => {
     })
     expect(useStore.getState().hooks[0]?.missing).not.toBe(true)
     expect(useStore.getState().ctas[0]?.missing).not.toBe(true)
+    expect(mocks.createRenderBatchDirectory).not.toHaveBeenCalled()
     expect(mocks.renderBatch).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: 'Render 1 Videos' }).hasAttribute('disabled')).toBe(
       true

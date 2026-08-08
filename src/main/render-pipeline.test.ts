@@ -1,19 +1,86 @@
-import { describe, it, expect } from 'vitest'
-import { existsSync, mkdtempSync, writeFileSync } from 'fs'
+import { describe, it, expect, vi } from 'vitest'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { basename, join } from 'path'
 import {
+  clearTrackedTempFiles,
+  createUniqueRenderBatchDirectory,
   escapeConcatPath,
   escapeFilterPath,
   formatAssTimestamp,
   generateAssFile,
-  generateWordHighlightAssFile,
   generateCombinedAssFile,
-  trackTempFile,
+  generateWordHighlightAssFile,
+  getFfmpegOverwriteOption,
+  getTrackedTempFileCount,
   releaseTempFile,
-  clearTrackedTempFiles,
-  getTrackedTempFileCount
+  resolveRenderOverwriteDecision,
+  trackTempFile
 } from './render-pipeline'
+
+describe('render batch destinations', () => {
+  it('creates a new readable directory for every render run using the injected clock', () => {
+    const baseDirectory = mkdtempSync(join(tmpdir(), 'batchedit-output-'))
+    const dates = [new Date(2026, 7, 8, 10, 11, 12), new Date(2026, 7, 8, 10, 11, 13)]
+    let dateIndex = 0
+    const clock = {
+      now: (): Date => {
+        const date = dates[dateIndex]
+        dateIndex += 1
+        if (!date) throw new Error('Test clock exhausted')
+        return date
+      }
+    }
+
+    try {
+      const firstDirectory = createUniqueRenderBatchDirectory(baseDirectory, clock)
+      const secondDirectory = createUniqueRenderBatchDirectory(baseDirectory, clock)
+
+      expect(basename(firstDirectory)).toBe('BatchEdit 2026-08-08 10-11-12')
+      expect(basename(secondDirectory)).toBe('BatchEdit 2026-08-08 10-11-13')
+      expect(firstDirectory).not.toBe(secondDirectory)
+      expect(existsSync(firstDirectory)).toBe(true)
+      expect(existsSync(secondDirectory)).toBe(true)
+    } finally {
+      rmSync(baseDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('adds a collision-safe suffix when two runs receive the same timestamp', () => {
+    const baseDirectory = mkdtempSync(join(tmpdir(), 'batchedit-output-'))
+    const clock = { now: (): Date => new Date(2026, 7, 8, 10, 11, 12) }
+
+    try {
+      const firstDirectory = createUniqueRenderBatchDirectory(baseDirectory, clock)
+      const secondDirectory = createUniqueRenderBatchDirectory(baseDirectory, clock)
+
+      expect(basename(firstDirectory)).toBe('BatchEdit 2026-08-08 10-11-12')
+      expect(basename(secondDirectory)).toBe('BatchEdit 2026-08-08 10-11-12 (2)')
+      expect(existsSync(secondDirectory)).toBe(true)
+    } finally {
+      rmSync(baseDirectory, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('render output overwrite protection', () => {
+  it('uses no-overwrite by default and enables overwrite only after explicit confirmation', async () => {
+    const outputPath = join('/output', 'existing.mp4')
+    const pathExists = (candidate: string): boolean => candidate === outputPath
+    const declineOverwrite = vi.fn(async () => false)
+    const confirmOverwrite = vi.fn(async () => true)
+
+    const declined = await resolveRenderOverwriteDecision([outputPath], pathExists, declineOverwrite)
+    const confirmed = await resolveRenderOverwriteDecision([outputPath], pathExists, confirmOverwrite)
+
+    expect(declined).toEqual({ ok: false, existingPaths: [outputPath] })
+    expect(confirmed).toEqual({ ok: true, overwriteExisting: true })
+    expect(declineOverwrite).toHaveBeenCalledWith([outputPath])
+    expect(confirmOverwrite).toHaveBeenCalledWith([outputPath])
+    expect(getFfmpegOverwriteOption(false)).toBe('-n')
+    expect(getFfmpegOverwriteOption(confirmed.ok && confirmed.overwriteExisting)).toBe('-y')
+  })
+})
 
 // ---------------------------------------------------------------------------
 // Temp-file tracking

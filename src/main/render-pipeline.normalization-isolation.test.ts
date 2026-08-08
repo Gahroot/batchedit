@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -7,15 +7,21 @@ import type { RenderJob, RenderProgress } from './render-pipeline'
 const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
   getVideoMetadata: vi.fn(),
-  savedOutputs: [] as string[]
+  savedOutputs: [] as string[],
+  savedOutputOptions: new Map<string, string[]>(),
+  confirmOverwrite: vi.fn<(existingPaths: readonly string[]) => Promise<boolean>>()
 }))
 
 function createFfmpegCommand(): Record<string, unknown> {
   const handlers = new Map<string, (...args: unknown[]) => void>()
   const command: Record<string, unknown> = {}
+  let outputOptions: string[] = []
   command.input = () => command
   command.inputOptions = () => command
-  command.outputOptions = () => command
+  command.outputOptions = (options: string[]) => {
+    outputOptions = options
+    return command
+  }
   command.videoFilters = () => command
   command.on = (event: string, handler: (...args: unknown[]) => void) => {
     handlers.set(event, handler)
@@ -23,6 +29,7 @@ function createFfmpegCommand(): Record<string, unknown> {
   }
   command.save = (outputPath: string) => {
     mocks.savedOutputs.push(outputPath)
+    mocks.savedOutputOptions.set(outputPath, outputOptions)
     handlers.get('start')?.('ffmpeg concat')
     handlers.get('progress')?.({ percent: 100 })
     handlers.get('end')?.()
@@ -37,6 +44,7 @@ vi.mock('electron', () => ({
     isPackaged: false,
     getAppPath: () => '/app'
   },
+  dialog: { showMessageBox: vi.fn() },
   ipcMain: {
     handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
       mocks.handlers.set(channel, handler)
@@ -82,9 +90,12 @@ describe('render normalization isolation', () => {
   beforeEach(() => {
     mocks.handlers.clear()
     mocks.savedOutputs.length = 0
+    mocks.savedOutputOptions.clear()
     mocks.getVideoMetadata.mockReset()
+    mocks.confirmOverwrite.mockReset()
+    mocks.confirmOverwrite.mockResolvedValue(false)
     tempDir = mkdtempSync(join(tmpdir(), 'batchedit-rf004-'))
-    setupRenderPipeline()
+    setupRenderPipeline({ confirmOverwrite: mocks.confirmOverwrite })
   })
 
   afterEach(() => {
@@ -130,5 +141,51 @@ describe('render normalization isolation', () => {
       })
     ])
     expect(mocks.savedOutputs).toEqual([join(tempDir, 'all-valid-sources.mp4')])
+    expect(mocks.savedOutputOptions.get(join(tempDir, 'all-valid-sources.mp4'))).toContain('-n')
+  })
+
+  it('does not touch an existing result unless overwrite is explicitly confirmed', async () => {
+    const hookPath = source('hook.mp4')
+    const meatPath = source('meat.mp4')
+    const ctaPath = source('cta.mp4')
+    const job = createJob('existing-result', hookPath, meatPath, ctaPath)
+    writeFileSync(job.outputPath, 'original result', 'utf-8')
+    const renderBatch = mocks.handlers.get('render:batch')
+    if (!renderBatch) throw new Error('render:batch handler was not registered')
+
+    const results = (await renderBatch({ sender: { send: vi.fn() } }, [job])) as RenderProgress[]
+
+    expect(results[0]).toEqual(expect.objectContaining({
+      status: 'error',
+      error: 'Render canceled — existing output was not overwritten.'
+    }))
+    expect(mocks.confirmOverwrite).toHaveBeenCalledWith([job.outputPath])
+    expect(mocks.savedOutputs).toEqual([])
+    expect(readFileSync(job.outputPath, 'utf-8')).toBe('original result')
+  })
+
+  it('passes FFmpeg an overwrite flag after explicit confirmation', async () => {
+    mocks.confirmOverwrite.mockResolvedValue(true)
+    const hookPath = source('hook.mp4')
+    const meatPath = source('meat.mp4')
+    const ctaPath = source('cta.mp4')
+    const job = createJob('confirmed-overwrite', hookPath, meatPath, ctaPath)
+    writeFileSync(job.outputPath, 'original result', 'utf-8')
+    mocks.getVideoMetadata.mockResolvedValue({
+      duration: 4,
+      width: 1080,
+      height: 1920,
+      fps: 30,
+      codec: 'h264',
+      audioCodec: 'aac'
+    })
+    const renderBatch = mocks.handlers.get('render:batch')
+    if (!renderBatch) throw new Error('render:batch handler was not registered')
+
+    const results = (await renderBatch({ sender: { send: vi.fn() } }, [job])) as RenderProgress[]
+
+    expect(results[0]).toEqual(expect.objectContaining({ status: 'done' }))
+    expect(mocks.confirmOverwrite).toHaveBeenCalledWith([job.outputPath])
+    expect(mocks.savedOutputOptions.get(job.outputPath)).toContain('-y')
   })
 })

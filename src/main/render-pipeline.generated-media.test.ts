@@ -20,6 +20,7 @@ vi.mock('electron', () => ({
     getPath: () => mocks.userDataPath,
     isPackaged: false
   },
+  dialog: { showMessageBox: vi.fn() },
   ipcMain: {
     handle: (channel: string, handler: (...args: unknown[]) => unknown) => {
       mocks.handlers.set(channel, handler)

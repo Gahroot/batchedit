@@ -182,6 +182,7 @@ interface Api {
   isInsideSafeZone: (rect: SafeZoneRect, platform: Platform) => Promise<boolean>
   toAssMargins: (rect: SafeZoneRect) => Promise<{ MarginL: number; MarginR: number; MarginV: number }>
   getAllPlatforms: () => Promise<Record<Platform, PlatformSafeZone>>
+  createRenderBatchDirectory: (outputDirectory: string) => Promise<string>
   renderBatch: (jobs: RenderJob[]) => Promise<RenderProgress[]>
   cancelRender: (batchId?: string) => Promise<boolean>
   onRenderProgress: (callback: (progress: RenderProgress[]) => void) => () => void

@@ -1,7 +1,7 @@
-import { ipcMain, app } from 'electron'
+import { ipcMain, app, dialog } from 'electron'
 import ffmpegModule from 'fluent-ffmpeg'
 import { ffmpeg, getVideoMetadata, extractAudio, trimVideo, trimVideoReencode, detectLeadingSilence, trimLeadingSilence, getEncoder, getSoftwareEncoder, isGpuSessionError } from './ffmpeg'
-import { basename, extname, join, normalize } from 'path'
+import { basename, dirname, extname, join, normalize } from 'path'
 import { writeFileSync, mkdirSync, unlinkSync, readFileSync, existsSync, statSync } from 'fs'
 import { tmpdir, cpus } from 'os'
 import { v4 as uuidv4 } from 'uuid'
@@ -19,6 +19,89 @@ function getFontsDir(): string {
 
 const FFMPEG_UNSUPPORTED_PATH_CONTROL_CHARS = /[\r\n]/
 const trackedTempFiles = new Set<string>()
+
+export interface Clock {
+  now(): Date
+}
+
+export interface RenderPipelineOptions {
+  clock?: Clock
+  confirmOverwrite?: (existingPaths: readonly string[]) => Promise<boolean>
+}
+
+export type RenderOverwriteDecision =
+  | { ok: true; overwriteExisting: boolean }
+  | { ok: false; existingPaths: string[] }
+
+const SYSTEM_CLOCK: Clock = {
+  now: () => new Date()
+}
+
+function padDatePart(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+function formatRenderBatchName(date: Date): string {
+  if (!Number.isFinite(date.getTime())) throw new Error('Render batch clock returned an invalid date')
+  const day = [date.getFullYear(), padDatePart(date.getMonth() + 1), padDatePart(date.getDate())].join('-')
+  const time = [padDatePart(date.getHours()), padDatePart(date.getMinutes()), padDatePart(date.getSeconds())].join('-')
+  return `BatchEdit ${day} ${time}`
+}
+
+/** Atomically reserves a readable per-run directory; a numeric suffix handles clock collisions. */
+export function createUniqueRenderBatchDirectory(baseDirectory: string, clock: Clock): string {
+  if (baseDirectory.trim().length === 0) throw new Error('Output directory is required')
+  mkdirSync(baseDirectory, { recursive: true })
+  const batchName = formatRenderBatchName(clock.now())
+
+  for (let sequence = 1; ; sequence++) {
+    const suffix = sequence === 1 ? '' : ` (${sequence})`
+    const candidate = join(baseDirectory, `${batchName}${suffix}`)
+    try {
+      mkdirSync(candidate)
+      return candidate
+    } catch (error: unknown) {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST') {
+        continue
+      }
+      throw error
+    }
+  }
+}
+
+export async function resolveRenderOverwriteDecision(
+  outputPaths: readonly string[],
+  pathExists: (outputPath: string) => boolean,
+  confirmOverwrite: (existingPaths: readonly string[]) => Promise<boolean>
+): Promise<RenderOverwriteDecision> {
+  const existingPaths = [...new Set(outputPaths.map(normalize).filter(pathExists))].sort()
+  if (existingPaths.length === 0) return { ok: true, overwriteExisting: false }
+  if (await confirmOverwrite(existingPaths)) return { ok: true, overwriteExisting: true }
+  return { ok: false, existingPaths }
+}
+
+export function getFfmpegOverwriteOption(overwriteExisting: boolean): '-y' | '-n' {
+  return overwriteExisting ? '-y' : '-n'
+}
+
+async function confirmRenderOverwrite(existingPaths: readonly string[]): Promise<boolean> {
+  const previewNames = existingPaths.slice(0, 5).map((outputPath) => basename(outputPath))
+  const remainingCount = existingPaths.length - previewNames.length
+  const detail = remainingCount > 0
+    ? `${previewNames.join('\n')}\n…and ${remainingCount} more`
+    : previewNames.join('\n')
+  const result = await dialog.showMessageBox({
+    type: 'warning',
+    title: 'Overwrite existing renders?',
+    message: `${existingPaths.length} render ${existingPaths.length === 1 ? 'file already exists' : 'files already exist'}.`,
+    detail,
+    buttons: ['Cancel', 'Overwrite'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  })
+  return result.response === 1
+}
 
 export function trackTempFile(filePath: string): string {
   trackedTempFiles.add(filePath)
@@ -456,6 +539,7 @@ async function preNormalizeAllClips(
 function concatStreamCopy(
   clipPaths: string[],
   outputPath: string,
+  overwriteExisting: boolean,
   onProgress: (percent: number) => void,
   cancellation: RenderCancellationState
 ): Promise<void> {
@@ -472,7 +556,7 @@ function concatStreamCopy(
       .input(listPath)
       .inputOptions(['-f', 'concat', '-safe', '0'])
       .outputOptions([
-        '-y',
+        getFfmpegOverwriteOption(overwriteExisting),
         '-c', 'copy',
         '-movflags', '+faststart'
       ])
@@ -486,7 +570,9 @@ function concatStreamCopy(
       .on('error', (err, _stdout, stderr) => {
         unregisterFfmpegCommand(command, cancellation)
         releaseTempFile(listPath)
-        try { unlinkSync(outputPath) } catch {}
+        if (overwriteExisting) {
+          try { unlinkSync(outputPath) } catch {}
+        }
         if (cancellation.isCanceled) {
           reject(new RenderCanceledError())
           return
@@ -505,6 +591,7 @@ function concatStreamCopy(
 function concatWithOverlays(
   job: RenderJob,
   normalizedPaths: string[],
+  overwriteExisting: boolean,
   onProgress: (phase: RenderProgressPhase, percent: number) => void,
   cancellation: RenderCancellationState
 ): Promise<void> {
@@ -534,7 +621,7 @@ function concatWithOverlays(
         unregisterFfmpegCommand(concatCmd, cancellation)
         releaseTempFile(listPath)
         // Step 2: apply overlays/captions on the concatenated file
-        applyOverlays(job, tempConcat, outputPath, onProgress, cancellation)
+        applyOverlays(job, tempConcat, outputPath, overwriteExisting, onProgress, cancellation)
           .then(() => {
             releaseTempFile(tempConcat)
             resolve()
@@ -548,7 +635,9 @@ function concatWithOverlays(
         unregisterFfmpegCommand(concatCmd, cancellation)
         releaseTempFile(listPath)
         releaseTempFile(tempConcat)
-        try { unlinkSync(outputPath) } catch {}
+        if (overwriteExisting) {
+          try { unlinkSync(outputPath) } catch {}
+        }
         if (cancellation.isCanceled) {
           reject(new RenderCanceledError())
           return
@@ -640,6 +729,7 @@ function runOverlayEncode(
   extraInputPaths: string[],
   finalVideoLabel: string,
   encoderConfig: { encoder: string; presetFlag: string[] },
+  overwriteExisting: boolean,
   onProgress: (percent: number) => void,
   cancellation: RenderCancellationState
 ): Promise<void> {
@@ -651,7 +741,7 @@ function runOverlayEncode(
     command
       .complexFilter(filters.join(';'))
       .outputOptions([
-        '-y',
+        getFfmpegOverwriteOption(overwriteExisting),
         '-map', finalVideoLabel,
         '-map', '0:a',
         '-c:v', encoderConfig.encoder, ...encoderConfig.presetFlag,
@@ -666,7 +756,9 @@ function runOverlayEncode(
       })
       .on('error', (err, _stdout, stderr) => {
         unregisterFfmpegCommand(command, cancellation)
-        try { unlinkSync(outputPath) } catch {}
+        if (overwriteExisting) {
+          try { unlinkSync(outputPath) } catch {}
+        }
         if (cancellation.isCanceled) {
           reject(new RenderCanceledError())
           return
@@ -686,6 +778,7 @@ async function applyOverlays(
   job: RenderJob,
   inputPath: string,
   outputPath: string,
+  overwriteExisting: boolean,
   onProgress: (phase: RenderProgressPhase, percent: number) => void,
   cancellation: RenderCancellationState
 ): Promise<void> {
@@ -697,14 +790,15 @@ async function applyOverlays(
   }
 
   try {
-    await runOverlayEncode(inputPath, outputPath, filters, extraInputPaths, finalVideoLabel, getEncoder(), (percent) => onProgress('overlay', percent), cancellation)
+    await runOverlayEncode(inputPath, outputPath, filters, extraInputPaths, finalVideoLabel, getEncoder(), overwriteExisting, (percent) => onProgress('overlay', percent), cancellation)
     cleanup()
   } catch (err: any) {
     // If GPU encoder ran out of sessions, retry with software encoder
     if (isGpuSessionError(err.message)) {
       console.log(`[FFmpeg overlay] GPU session exhausted, retrying with libx264`)
       try {
-        await runOverlayEncode(inputPath, outputPath, filters, extraInputPaths, finalVideoLabel, getSoftwareEncoder(), (percent) => onProgress('overlay', percent), cancellation)
+        try { unlinkSync(outputPath) } catch {}
+        await runOverlayEncode(inputPath, outputPath, filters, extraInputPaths, finalVideoLabel, getSoftwareEncoder(), overwriteExisting, (percent) => onProgress('overlay', percent), cancellation)
         cleanup()
       } catch (retryErr: any) {
         cleanup()
@@ -743,7 +837,9 @@ function getSlowConcurrency(): number {
   return Math.max(1, Math.floor(CPU_COUNT / 2))
 }
 
-export function setupRenderPipeline(): void {
+export function setupRenderPipeline(options: RenderPipelineOptions = {}): void {
+  const clock = options.clock ?? SYSTEM_CLOCK
+  const confirmOverwrite = options.confirmOverwrite ?? confirmRenderOverwrite
   // Get video metadata
   ipcMain.handle(
     'ffmpeg:getMetadata',
@@ -949,6 +1045,13 @@ export function setupRenderPipeline(): void {
     })
   })
 
+  ipcMain.handle('render:createBatchDirectory', async (_event, outputDirectory: unknown) => {
+    if (typeof outputDirectory !== 'string' || outputDirectory.trim().length === 0) {
+      throw new Error('A valid output directory is required')
+    }
+    return createUniqueRenderBatchDirectory(outputDirectory, clock)
+  })
+
   ipcMain.handle('render:cancel', async (_event, batchId?: string) => {
     return cancelActiveRenderBatch(batchId)
   })
@@ -970,11 +1073,27 @@ export function setupRenderPipeline(): void {
         return results
       }
 
-      // Create output directory
-      if (jobs.length > 0) {
-        const outDir = join(jobs[0].outputPath, '..')
-        mkdirSync(outDir, { recursive: true })
+      const overwriteDecision = await resolveRenderOverwriteDecision(
+        jobs.map((job) => job.outputPath),
+        existsSync,
+        confirmOverwrite
+      )
+      if (!overwriteDecision.ok) {
+        const detail = overwriteDecision.existingPaths.join('\n')
+        for (const result of results) {
+          result.percent = 100
+          result.status = 'error'
+          result.error = 'Render canceled — existing output was not overwritten.'
+          result.errorDetail = detail
+        }
+        sendProgress({ force: true })
+        activeRenderBatches.delete(batchId)
+        return results
       }
+      const { overwriteExisting } = overwriteDecision
+
+      // The renderer normally reserves this unique batch directory before submitting jobs.
+      mkdirSync(dirname(jobs[0].outputPath), { recursive: true })
 
       // --- Phase 1: Pre-normalize all unique clips ---
       // Mark all jobs as normalizing
@@ -1142,13 +1261,13 @@ export function setupRenderPipeline(): void {
 
           throwIfCanceled(cancellation)
           if (jobNeedsOverlays(job)) {
-            await concatWithOverlays(job, normalizedPaths, (phase, percent) => {
+            await concatWithOverlays(job, normalizedPaths, overwriteExisting, (phase, percent) => {
               results[idx].status = phase === 'concat' ? 'concatenating' : 'overlaying'
               results[idx].percent = mapPhaseProgress(phase, percent)
               sendProgress()
             }, cancellation)
           } else {
-            await concatStreamCopy(normalizedPaths, job.outputPath, (percent) => {
+            await concatStreamCopy(normalizedPaths, job.outputPath, overwriteExisting, (percent) => {
               results[idx].status = 'concatenating'
               results[idx].percent = clampProgressPercent(percent)
               sendProgress()
@@ -1162,7 +1281,9 @@ export function setupRenderPipeline(): void {
           if (error instanceof RenderCanceledError || cancellation.isCanceled) {
             results[idx].status = 'canceled'
             results[idx].error = 'Render canceled'
-            try { unlinkSync(job.outputPath) } catch {}
+            if (overwriteExisting) {
+              try { unlinkSync(job.outputPath) } catch {}
+            }
           } else {
             const humanized = humanizeFfmpegError(error.message)
             results[idx].status = 'error'
@@ -1217,9 +1338,11 @@ export function setupRenderPipeline(): void {
               r.error = 'Render canceled'
             }
           }
-          for (const job of jobs) {
-            if (results.find((r) => r.jobId === job.id)?.status === 'canceled') {
-              try { unlinkSync(job.outputPath) } catch {}
+          if (overwriteExisting) {
+            for (const job of jobs) {
+              if (results.find((r) => r.jobId === job.id)?.status === 'canceled') {
+                try { unlinkSync(job.outputPath) } catch {}
+              }
             }
           }
           sendProgress({ force: true })

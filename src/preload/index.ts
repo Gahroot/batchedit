@@ -95,6 +95,8 @@ const api = {
   getAllPlatforms: () => ipcRenderer.invoke('safezones:getAllPlatforms'),
 
   // Rendering
+  createRenderBatchDirectory: (outputDirectory: string): Promise<string> =>
+    ipcRenderer.invoke('render:createBatchDirectory', outputDirectory),
   renderBatch: (jobs: any[]) => ipcRenderer.invoke('render:batch', jobs),
   cancelRender: (batchId?: string) => ipcRenderer.invoke('render:cancel', batchId),
   onRenderProgress: (callback: (progress: any[]) => void) => {

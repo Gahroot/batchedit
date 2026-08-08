@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+
+vi.mock('electron', () => ({ app: { isPackaged: false } }))
+
 import { detectSilenceBounds, parseSilenceEnd, parseSilenceStart, setupFFmpeg } from './ffmpeg'
 
 describe('parseSilenceEnd', () => {
